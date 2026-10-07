@@ -45,10 +45,26 @@ fn depth_view(device: &wgpu::Device, w: u32, h: u32) -> wgpu::TextureView {
 #[wasm_bindgen]
 impl Viewer {
     /// Opens WebGPU on `canvas` (its `width`/`height` attributes set the drawing size).
-    pub async fn create(canvas: web_sys::HtmlCanvasElement) -> Result<Viewer, JsValue> {
+    ///
+    /// `backend`: `auto` (WebGPU when the browser has it, otherwise WebGL2), `webgpu` or `webgl`.
+    /// A canvas keeps the first context type it was given, so the choice is made before the surface.
+    pub async fn create(
+        canvas: web_sys::HtmlCanvasElement,
+        backend: String,
+    ) -> Result<Viewer, JsValue> {
         let (w, h) = (canvas.width().max(1), canvas.height().max(1));
+        let webgpu = match backend.as_str() {
+            "webgpu" => true,
+            "webgl" => false,
+            "auto" | "" => wgpu::util::is_browser_webgpu_supported().await,
+            other => return Err(JsValue::from_str(&format!("unknown backend {other}"))),
+        };
         let mut desc = wgpu::InstanceDescriptor::new_without_display_handle();
-        desc.backends = wgpu::Backends::BROWSER_WEBGPU;
+        desc.backends = if webgpu {
+            wgpu::Backends::BROWSER_WEBGPU
+        } else {
+            wgpu::Backends::GL
+        };
         let instance = wgpu::Instance::new(desc);
         let surface = instance
             .create_surface(wgpu::SurfaceTarget::Canvas(canvas))
@@ -65,6 +81,13 @@ impl Viewer {
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {
                 memory_hints: wgpu::MemoryHints::MemoryUsage,
+                // WebGL2 cannot meet wgpu's default limits; ask only for what WebGL2 guarantees,
+                // raised to the adapter's texture sizes.
+                required_limits: if webgpu {
+                    wgpu::Limits::default()
+                } else {
+                    wgpu::Limits::downlevel_webgl2_defaults().using_resolution(adapter.limits())
+                },
                 ..Default::default()
             })
             .await
@@ -167,6 +190,13 @@ impl Viewer {
             signal.await;
             Ok(JsValue::UNDEFINED)
         })
+    }
+
+    /// Lets wgpu run completion callbacks without blocking. WebGPU calls them by itself; on WebGL2
+    /// they only run when the device is polled, so `gpu_done` would never resolve (P2.4). Call it
+    /// once per animation frame.
+    pub fn poll(&self) {
+        let _ = self.device.poll(wgpu::PollType::Poll);
     }
 
     /// Points on screen.

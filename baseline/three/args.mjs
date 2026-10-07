@@ -19,5 +19,7 @@ export function chromeArgs(args) {
   return [
     '--use-angle=d3d11', '--enable-gpu', '--ignore-gpu-blocklist', '--window-size=1920,1080',
     ...(args['no-vsync'] ? ['--disable-gpu-vsync', '--disable-frame-rate-limit'] : []),
+    // --chrome-args a,b=c: extra switches without their dashes, for A/B runs (e.g. WebGPU off, P2.4).
+    ...(typeof args['chrome-args'] === 'string' ? args['chrome-args'].split(',').map((s) => `--${s}`) : []),
   ];
 }

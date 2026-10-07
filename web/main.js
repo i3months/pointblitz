@@ -8,6 +8,7 @@
 //     cold    only the last snapshot of the manifest, as one full delivery
 //   speed    = replay speed factor (default 60)
 //   view     = viewpoint to start at (default overview_sw)
+//   backend  = auto | webgpu | webgl   (auto: WebGPU when available, otherwise WebGL2 — P2.4)
 //
 // Hooks on window.__pb (read by bench/web/*.mjs and the baseline harness): marks [{name, t, ...}],
 // frames [t], longtasks [{t, ms}], info, gpu, setView(name), ready, done. Mark names follow the
@@ -20,6 +21,7 @@ import { ChunkSplitter } from './chunks.js';
 const params = new URLSearchParams(location.search);
 const scenario = params.get('scenario') ?? 'still';
 const speed = Number(params.get('speed') ?? 60);
+const backend = params.get('backend') ?? 'auto';
 const pb = (window.__pb = { marks: [], frames: [], longtasks: [], syncFrames: [], ready: false, done: false, setView });
 const mark = (name, extra = {}) => pb.marks.push({ name, t: performance.now(), ...extra });
 // Main-thread blocks over 50 ms (SPEC §6.2 main_thread_block), same observer as the baseline.
@@ -37,6 +39,7 @@ let toPresent = []; // snapshots whose last chunk is in the scene but not drawn 
 // Draw only when something changed (decision 0027); the loop itself costs nothing when idle.
 function frame(t) {
   pb.frames.push(t);
+  viewer?.poll(); // completion callbacks on WebGL2 (decision 0031); no-op on WebGPU
   if (dirty && viewer) {
     dirty = false;
     viewer.render();
@@ -163,10 +166,10 @@ async function main() {
   mark('wasm_init_start');
   await init();
   mark('wasm_init_end');
-  viewer = await Viewer.create(document.getElementById('view'));
+  viewer = await Viewer.create(document.getElementById('view'), backend);
   pb.info = JSON.parse(viewer.info());
   // WebGPU does not give wgpu the adapter name; the browser's GPUAdapter.info says which GPU it is.
-  const a = await navigator.gpu.requestAdapter({ powerPreference: 'high-performance' });
+  const a = navigator.gpu && pb.info.backend === 'BrowserWebGpu' ? await navigator.gpu.requestAdapter({ powerPreference: 'high-performance' }) : null;
   pb.gpu = a && { vendor: a.info.vendor, architecture: a.info.architecture, device: a.info.device, description: a.info.description };
   mark('viewer', { info: pb.info, gpu: pb.gpu });
   requestAnimationFrame(frame);

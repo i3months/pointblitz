@@ -18,7 +18,8 @@ pointblitz-core.workspace = true
 wasm-bindgen = "=0.2.129"
 wasm-bindgen-futures = "0.4.79"
 web-sys = { version = "0.3.106", features = ["HtmlCanvasElement", "Window", "Document", "console"] }
-wgpu = "30.0.1"
+# webgl: WebGL2 fallback when the browser has no WebGPU (P2.4, decision 0031).
+wgpu = { version = "30.0.1", features = ["webgl"] }
 
 [lints]
 workspace = true
