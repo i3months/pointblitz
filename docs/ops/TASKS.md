@@ -11,7 +11,7 @@
 | P0.3 | 시나리오 재생 서버: `flight-01` 을 HTTP 로 서빙하고 이벤트 시각을 배속으로 알림(기준 방식·새 방식 공용) | 배속 ×1·×60 재생, 이벤트 순서·시각 로그 | [x] 2026-10-07 `90ec067` |
 | P0.4 | 기준 방식 `baseline/three`: three.js 0.185 `PLYLoader` + `Points`, SPEC §5 그대로 | `replay`·`orbit`·`cold` 시나리오 실행, 화면 캡처 저장(고정 시점 8곳 캡처로 P0.2 재확인) | [x] 2026-10-07 `ddd068c` |
 | P0.5 | 브라우저 지표 수집(Chrome, CDP): 전송 바이트, 이벤트 반영 시간, 첫 화면, 프레임 시간, 메인 스레드 블록, JS 힙 | SPEC §6.2 지표가 JSON Lines 로 나온다 | [x] 2026-10-07 `53d564e` |
-| P0.6 | 기준 방식 측정 실행(RTX 4070 PC) + 결과 `docs/bench/baseline-three.md` | 비교표 three.js 열이 실측으로 채워진다(재현 명령 포함) | [ ] |
+| P0.6 | 기준 방식 측정 실행(RTX 4070 PC) + 결과 `docs/bench/baseline-three.md` | 비교표 three.js 열이 실측으로 채워진다(재현 명령 포함) | [x] 2026-10-07 `d180c19` |
 | P0.7 | 소유자에게 목표 수치 결정 요청 | STATUS `소유자 결정 대기` 에 올라간다 | [ ] |
 
 ## P1 — native
