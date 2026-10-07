@@ -4,6 +4,7 @@
 // usage: node run.mjs --server http://127.0.0.1:8700 --scenario replay|cold|orbit|memtest|memspike
 //                     [--speed 60] [--metrics <file.jsonl>] [--raw <file.json>] [--chrome <path>] [--headed]
 //                     [--target three.js|web]   (web = PointBlitz web/index.html; default three.js)
+//                     [--label <name>]          (implementation name in the records, e.g. web-webgl2)
 //
 // Raw hooks come from window.__pb (marks, frames, longtasks, syncFrames). Memory: JS heap over CDP
 // (secondary) and renderer / GPU process private bytes from the OS (mem_cpu, procmem.mjs).
@@ -112,7 +113,7 @@ const device = {
 };
 
 if (args.raw) fs.writeFileSync(args.raw, JSON.stringify(raw));
-const records = summarize(raw, { device, commit, target });
+const records = summarize(raw, { device, commit, target: args.label ?? target });
 if (args.metrics) fs.writeFileSync(args.metrics, records.map((r) => JSON.stringify(r)).join('\n') + '\n');
 for (const r of records) {
   console.log(`${r.metric.padEnd(30)} ${String(r.value).padStart(14)} ${r.unit}`);

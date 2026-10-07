@@ -1,11 +1,12 @@
 // PointBlitz in the browser (P2, decisions 0028, 0029, 0030): the wasm viewer on a WebGPU canvas.
 //
 // URL parameters:
-//   scenario = check | still | replay | cold
+//   scenario = check | still | replay | cold | orbit
 //     check   report the adapter only (P2.1)
 //     still   load the last snapshot, then hold (fixed-viewpoint captures, P2.2)
 //     replay  follow /events like the native client (decision 0026), chunks streamed as they arrive
 //     cold    only the last snapshot of the manifest, as one full delivery
+//     orbit   cold, then 120 synchronised frames at each fixed viewpoint (SPEC §6.2 frame_time)
 //   speed    = replay speed factor (default 60)
 //   view     = viewpoint to start at (default overview_sw)
 //   backend  = auto | webgpu | webgl   (auto: WebGPU when available, otherwise WebGL2 — P2.4)
@@ -35,12 +36,13 @@ let fov = 50;
 let dirty = false;
 let waiters = [];
 let toPresent = []; // snapshots whose last chunk is in the scene but not drawn yet
+let stopLoop = false; // orbit draws its own frames
 
 // Draw only when something changed (decision 0027); the loop itself costs nothing when idle.
 function frame(t) {
   pb.frames.push(t);
   viewer?.poll(); // completion callbacks on WebGL2 (decision 0031); no-op on WebGPU
-  if (dirty && viewer) {
+  if (dirty && viewer && !stopLoop) {
     dirty = false;
     viewer.render();
     const seqs = toPresent;
@@ -162,6 +164,49 @@ async function cold(manifest) {
   await allPresented();
 }
 
+/** Yields to the event loop without timer clamping (setTimeout nests to ≥ 4 ms). */
+function yieldNow() {
+  return new Promise((resolve) => {
+    const ch = new MessageChannel();
+    ch.port1.onmessage = () => resolve();
+    ch.port2.postMessage(0);
+  });
+}
+
+/** Waits for the GPU to finish what was submitted, polling for WebGL2 (decision 0031). */
+async function gpuFinished() {
+  let done = false;
+  viewer.gpu_done().then(() => (done = true));
+  while (!done) {
+    viewer.poll();
+    await yieldNow();
+  }
+}
+
+// Synchronised frames (decision 0020), like the baseline and native orbit: cpu = render() call
+// (encode + submit); total = until the GPU reports the work done. The browser has no blocking
+// readback for WebGPU, so "done" is queue.onSubmittedWorkDone (WebGL2: fence, polled) — it can add
+// a little dispatch latency, so total is an upper bound (decision 0032).
+async function orbit() {
+  const framesPerView = Number(params.get('frames') ?? 120);
+  for (let i = 0; i < 3; i++) await redraw(); // let the swapped snapshot reach the screen first
+  stopLoop = true;
+  mark('sync_start');
+  for (const v of viewpoints) {
+    viewer.set_camera(new Float64Array(v.eye), new Float64Array(v.target), new Float64Array(v.up), fov);
+    for (let k = 0; k < framesPerView; k++) {
+      const t0 = performance.now();
+      viewer.render();
+      const t1 = performance.now();
+      await gpuFinished();
+      const t2 = performance.now();
+      pb.syncFrames.push({ view: v.name, cpu: t1 - t0, ms: t2 - t0 });
+    }
+  }
+  mark('sync_end');
+  stopLoop = false;
+}
+
 async function main() {
   mark('wasm_init_start');
   await init();
@@ -185,6 +230,10 @@ async function main() {
 
   if (scenario === 'replay') await replay();
   else if (scenario === 'cold' || scenario === 'still') await cold(manifest);
+  else if (scenario === 'orbit') {
+    await cold(manifest);
+    await orbit();
+  }
   else throw new Error(`unknown scenario ${scenario}`);
 }
 
