@@ -1,0 +1,4 @@
+target/
+*.ply
+node_modules/
+/out/
