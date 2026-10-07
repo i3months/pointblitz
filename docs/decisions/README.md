@@ -24,6 +24,6 @@
 | [0018](0018-replay-server.md) | 시나리오 재생 서버: std HTTP + SSE | 승인 |
 | [0019](0019-baseline-three-details.md) | 기준 방식(three.js) 구현 세부와 실행 환경 | 승인 |
 | [0020](0020-measurement-method.md) | 측정 방법: 무엇을 어떻게 재는가 | 승인 |
-| [0021](0021-measure-with-vsync-on.md) | 측정 기본은 vsync 켬(0020 vsync 행 대체) | 제안 |
+| [0021](0021-measure-with-vsync-on.md) | 측정 기본은 vsync 켬(0020 vsync 행 대체) | 승인 |
 
 "제안" 상태는 작업자가 제안한 것이다. 감독 검토 또는 소유자 확인 뒤 "승인" 이 된다.
