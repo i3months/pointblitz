@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
-# P1.5 comparison suite: three.js baseline and PointBlitz native, alternated run by run in one
+# Comparison suite (P1.5, P2.5): the three.js baseline and the PointBlitz targets, alternated run by run in one
 # session (PR #10 review — sessions drift, so both implementations must share one).
 #
 # usage: bash bench/suite.sh <ply dir> <out dir>        (run from the repository root)
-# env:   COLD=5 ORBIT=5 X60=3 X1=0 PORT=8783 IMPLS="three native"
+# env:   COLD=5 ORBIT=5 X60=3 X1=0 PORT=8783 IMPLS="three native web webs webgl"
+#        web = PointBlitz in Chrome on WebGPU, webs = same with the WebGPU-only module (decision 0033),
+#        webgl = same page with WebGPU switched off (WebGL2)
 #
 # Starts a renamed copy of the replay server and stops it by PID. Writes <impl>-<scenario>-<i>.jsonl
 # and the aggregated table (table.md).
@@ -16,9 +18,11 @@ ORBIT=${ORBIT:-5}
 X60=${X60:-3}
 X1=${X1:-0}
 PORT=${PORT:-8783}
-IMPLS=${IMPLS:-three native}
+IMPLS=${IMPLS:-three native web webs webgl}
 
 cargo build --release -q -p pointblitz-bench -p pointblitz-native
+bash web/build.sh > /dev/null
+bash web/build.sh webgpu > /dev/null
 EXT=$( [ -f target/release/pointblitz-bench.exe ] && echo .exe || true )
 BIN=target/release/pb-suite-replay$EXT
 cp "target/release/pointblitz-bench$EXT" "$BIN"
@@ -38,6 +42,9 @@ run() { # impl scenario speed index
   echo "$(date +%H:%M:%S) $name"
   case $impl in
     three) (cd baseline/three && node run.mjs --server "$URL" --scenario "$scen" --speed "$speed" --metrics "$ABS_OUT/$name.jsonl" > /dev/null) ;;
+    web) (cd baseline/three && node run.mjs --server "$URL" --target web --label web-webgpu --scenario "$scen" --speed "$speed" --metrics "$ABS_OUT/$name.jsonl" > /dev/null) ;;
+    webs) (cd baseline/three && node run.mjs --server "$URL" --target web --label web-webgpu-only --query pkg=webgpu --scenario "$scen" --speed "$speed" --metrics "$ABS_OUT/$name.jsonl" > /dev/null) ;;
+    webgl) (cd baseline/three && node run.mjs --server "$URL" --target web --label web-webgl2 --chrome-args disable-features=WebGPUService --scenario "$scen" --speed "$speed" --metrics "$ABS_OUT/$name.jsonl" > /dev/null) ;;
     native) node bench/native/run.mjs --server "$URL" --scenario "$scen" --speed "$speed" --exe "target/release/pointblitz-native$EXT" --metrics "$ABS_OUT/$name.jsonl" > /dev/null ;;
   esac
 }

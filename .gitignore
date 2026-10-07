@@ -4,3 +4,4 @@ node_modules/
 /out/
 bench/data/*/
 web/pkg/
+web/pkg-webgpu/
