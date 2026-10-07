@@ -1,0 +1,14 @@
+{
+  "name": "pointblitz-baseline-three",
+  "private": true,
+  "version": "0.0.0",
+  "description": "Reference implementation of the current three.js approach (decision 0005). Benchmark only, not shipped.",
+  "license": "MIT OR Apache-2.0",
+  "type": "module",
+  "dependencies": {
+    "three": "0.185.1"
+  },
+  "devDependencies": {
+    "playwright-core": "1.63.0"
+  }
+}
