@@ -1,40 +1,21 @@
-//! PointBlitz browser target (wasm): the same `pointblitz-core` on a canvas (P2, decision 0028).
+//! PointBlitz browser target (wasm): the same `pointblitz-core` on a canvas (P2, decisions 0028, 0029).
 //!
 //! Browser-only code is compiled for wasm32 alone; the host build keeps the crate checkable.
-//! Built with `web/build.sh` (cargo → wasm32 → `wasm-bindgen --target web`), loaded by `web/index.html`.
+//! Built with `web/build.sh` (cargo → wasm32 → `wasm-bindgen --target web`), loaded by `web/`.
+//!
+//! JS drives the loop: it hands chunks to [`Viewer::insert`], sets the camera, and calls
+//! [`Viewer::render`] from `requestAnimationFrame` only when something changed (decision 0027).
+//! [`Viewer::gpu_done`] resolves when the GPU has finished the frames submitted so far — the
+//! `presented` mark (decision 0020).
 
 #[cfg(target_arch = "wasm32")]
-use wasm_bindgen::prelude::*;
-
-/// Opens a WebGPU adapter for `canvas` and describes it as JSON
-/// (`{"name", "backend", "driver", "driver_info"}`) — the P2.1 check that the browser gives us a
-/// real GPU through WebGPU.
+mod viewer;
 #[cfg(target_arch = "wasm32")]
-#[wasm_bindgen]
-pub async fn adapter_info(canvas: web_sys::HtmlCanvasElement) -> Result<String, JsValue> {
-    let mut desc = wgpu::InstanceDescriptor::new_without_display_handle();
-    desc.backends = wgpu::Backends::BROWSER_WEBGPU;
-    let instance = wgpu::Instance::new(desc);
-    let surface = instance
-        .create_surface(wgpu::SurfaceTarget::Canvas(canvas))
-        .map_err(|e| JsValue::from_str(&format!("surface: {e}")))?;
-    let adapter = instance
-        .request_adapter(&wgpu::RequestAdapterOptions {
-            power_preference: wgpu::PowerPreference::HighPerformance,
-            compatible_surface: Some(&surface),
-            ..Default::default()
-        })
-        .await
-        .map_err(|e| JsValue::from_str(&format!("adapter: {e}")))?;
-    let info = adapter.get_info();
-    Ok(format!(
-        "{{\"name\":{},\"backend\":\"{:?}\",\"driver\":{},\"driver_info\":{}}}",
-        json_str(&info.name),
-        info.backend,
-        json_str(&info.driver),
-        json_str(&info.driver_info)
-    ))
-}
+pub use viewer::Viewer;
+
+// Used by the wasm viewer; on the host only its tests use it.
+#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+mod oneshot;
 
 #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
 fn json_str(s: &str) -> String {
