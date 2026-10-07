@@ -206,7 +206,30 @@ skylens 는 skyrecon 점군을 아직 그리지 않으므로, skylens 의 three.
 | P4 | 비용 모델, 공개용 비교표·README·데모 | 공개 |
 | P5 | 메시(지형·건물·텍스처 표면), Python 바인딩 | 별도 SPEC 갱신 |
 
-**목표 수치는 지금 정하지 않는다.** P0 에서 기준 방식을 잰 뒤 프로젝트 소유자가 정한다.
+목표 수치는 P0 에서 기준 방식을 잰 뒤 정했다(§7.1).
+
+### 7.1 목표 수치 (P0.7)
+
+PointBlitz 를 재기 전에 정했다. 근거·이유: [docs/ops/reviews/p0-7-targets.md](docs/ops/reviews/p0-7-targets.md). 기준 방식 값: [docs/bench/baseline-three.md](docs/bench/baseline-three.md).
+
+측정 조건(모든 목표 공통): `flight-01`, RTX 4070 12 GB · i7-13700F · Windows 11, 루프백 서버, 1920×1080, vsync 켬(결정 0021), 측정 방법 결정 0020.
+`replay` 는 ×60 으로 판정하고 ×1 은 같은 목표로 따로 보고한다.
+
+| 지표 | 목표 | 적용 | 기준 방식(×60 중앙값) |
+|---|---|---|---|
+| `event_latency` preview p50 | ≤ 50 ms | native · browser | 466.5 ms |
+| `event_latency` refined p50 | ≤ 200 ms | native · browser | 609.1 ms |
+| cold 마지막 스냅샷 `event_latency` | ≤ 300 ms | native · browser | 882.2 ms |
+| `main_thread_block` | 0 회(`replay` ×60 · `cold`) | browser | 16 회 · 6,305 ms |
+| `mem_cpu` 최대(`replay` ×60) | ≤ 300 MB | browser 렌더러 private / native 프로세스 private | 860.7 MB |
+| `frame_time_total` p50 / p95 / p99(`orbit`, 2.5 M 점) | 각각 기준 방식 이하 | native · browser | 2.8 / 3.8 / 6.0 ms |
+
+- `first_frame` 은 보고만 한다.
+- `frame_time` 비교는 두 구현의 점 모양이 같을 때만 유효하다(결정 0025).
+- 서버 영상(P3)의 목표는 P3 착수 때 정한다. 저사양 GPU 는 비용 모델(결정 0011)로 추정해 보고한다.
+- 대역폭(`bytes_total`)은 목표가 아니라 기록이다(INTENT 원칙 2).
+- 소유자가 다른 값을 정하면 그 값이 우선한다(§9 에 기록).
+
 
 ## 8. 공통 규칙
 
