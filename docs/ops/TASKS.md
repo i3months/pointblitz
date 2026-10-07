@@ -7,9 +7,9 @@
 | # | 작업 | 완료 기준 | 상태 |
 |---|---|---|---|
 | P0.1 | Cargo 워크스페이스 뼈대(크레이트 6개 빈 상태), 툴체인 고정, CI(빌드·fmt·clippy·시험, Windows·Linux) | `cargo build --workspace`·`cargo test --workspace` 가 CI 에서 통과 | [x] 2026-10-07 `fbeaaed` |
-| P0.2 | 고정 시점 8곳 `bench/viewpoints/flight-01.json`(ENU, 위치·목표·위·시야각·해상도) + 결정 기록 | 마지막 스냅샷 경계 상자 기준으로 정한 규칙이 결정 기록에 있고, 8곳 모두 점이 화면에 들어온다(캡처로 확인) | [ ] |
+| P0.2 | 고정 시점 8곳 `bench/viewpoints/flight-01.json`(ENU, 위치·목표·위·시야각·해상도) + 결정 기록 | 마지막 스냅샷 경계 상자 기준으로 정한 규칙이 결정 기록에 있고, 8곳 모두 점이 화면에 들어온다(캡처로 확인) | [x] 2026-10-07 `fb50aad`(캡처 대신 CPU 투영 검사 + 감독 독립 래스터, [검토](reviews/pr-3.md)) |
 | P0.3 | 시나리오 재생 서버: `flight-01` 을 HTTP 로 서빙하고 이벤트 시각을 배속으로 알림(기준 방식·새 방식 공용) | 배속 ×1·×60 재생, 이벤트 순서·시각 로그 | [ ] |
-| P0.4 | 기준 방식 `baseline/three`: three.js 0.185 `PLYLoader` + `Points`, SPEC §5 그대로 | `replay`·`orbit`·`cold` 시나리오 실행, 화면 캡처 저장 | [ ] |
+| P0.4 | 기준 방식 `baseline/three`: three.js 0.185 `PLYLoader` + `Points`, SPEC §5 그대로 | `replay`·`orbit`·`cold` 시나리오 실행, 화면 캡처 저장(고정 시점 8곳 캡처로 P0.2 재확인) | [ ] |
 | P0.5 | 브라우저 지표 수집(Chrome, CDP): 전송 바이트, 이벤트 반영 시간, 첫 화면, 프레임 시간, 메인 스레드 블록, JS 힙 | SPEC §6.2 지표가 JSON Lines 로 나온다 | [ ] |
 | P0.6 | 기준 방식 측정 실행(RTX 4070 PC) + 결과 `docs/bench/baseline-three.md` | 비교표 three.js 열이 실측으로 채워진다(재현 명령 포함) | [ ] |
 | P0.7 | 소유자에게 목표 수치 결정 요청 | STATUS `소유자 결정 대기` 에 올라간다 | [ ] |
