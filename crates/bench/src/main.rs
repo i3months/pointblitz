@@ -9,6 +9,7 @@
 //! - `compare <dir A> <dir B> [--viewpoints <json>] [--md <file>]`: SSIM and coverage per viewpoint.
 
 mod capture;
+mod chunks;
 mod image;
 mod replay;
 mod ssim;

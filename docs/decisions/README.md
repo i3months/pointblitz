@@ -29,5 +29,6 @@
 | [0023](0023-skyrecon-dev-dependency.md) | skyrecon-core 개발 의존성, 리비전 고정 | 승인 |
 | [0024](0024-core-render-design.md) | 렌더 코어 설계(P1.2) | 승인 |
 | [0025](0025-baseline-disk-without-mipmaps.md) | 기준 방식 원판 텍스처 밉맵 끔 | 승인 |
+| [0026](0026-chunk-delivery-and-native-client.md) | 청크 전달 프로토콜과 native 재생 클라이언트(P1.4) | 승인 |
 
 "제안" 상태는 작업자가 제안한 것이다. 감독 검토 또는 소유자 확인 뒤 "승인" 이 된다.
