@@ -52,3 +52,14 @@ pointblitz-bench replay --data <ply dir> --web . --port 8700
 node bench/web/capture.mjs --server http://127.0.0.1:8700 --out target/bench/pointblitz-web
 pointblitz-bench compare target/bench/pointblitz-native target/bench/pointblitz-web --viewpoints bench/viewpoints/flight-01.json
 ```
+
+## browser WebGL2 대체 (P2.4)
+
+WebGPU 를 끈 Chrome(`--disable-features=WebGPUService`)에서 페이지가 WebGL2(wgpu GL 백엔드, ANGLE D3D11)로 대체해 그린 화면.
+
+| 비교 | SSIM 평균 | 픽셀이 다른 비율 |
+|---|---:|---:|
+| browser(WebGL2) 대 native(Vulkan) | **1.0000** | 8곳 모두 0.00 % |
+| browser(WebGL2) 대 three.js | 0.9919 | native 와 같은 값 |
+
+재현: `node bench/web/capture.mjs --server http://127.0.0.1:8700 --out target/bench/pointblitz-webgl --chrome-args disable-features=WebGPUService`
