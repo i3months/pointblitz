@@ -272,7 +272,7 @@ fn stream_events(
     write!(
         stream,
         "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\n\
-         Access-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n"
+         Connection: close\r\n\r\n"
     )?;
     stream.flush()?;
     let t0 = Instant::now();
@@ -309,7 +309,7 @@ fn serve_file(stream: &mut TcpStream, path: &Path) -> std::io::Result<()> {
     write!(
         stream,
         "HTTP/1.1 200 OK\r\nContent-Type: {ty}\r\nContent-Length: {len}\r\n\
-         Access-Control-Allow-Origin: *\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n"
+         Cache-Control: no-store\r\nConnection: close\r\n\r\n"
     )?;
     std::io::copy(&mut file, stream)?;
     stream.flush()
@@ -324,7 +324,7 @@ fn respond(stream: &mut TcpStream, code: u16, ty: &str, body: &[u8]) -> std::io:
     write!(
         stream,
         "HTTP/1.1 {code} {reason}\r\nContent-Type: {ty}\r\nContent-Length: {}\r\n\
-         Access-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n",
+         Connection: close\r\n\r\n",
         body.len()
     )?;
     stream.write_all(body)?;
