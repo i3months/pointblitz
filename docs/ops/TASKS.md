@@ -34,6 +34,6 @@
 | P2.2 | `pointblitz-web` 그리기: canvas WebGPU 표면, core `Scene`·`Renderer`, 요청 때 그리기(결정 0027), 고정 시점 전환 | 마지막 스냅샷을 고정 시점 8곳에서 캡처해 native·three.js 캡처 대비 SSIM 을 기록한다 | [x] 2026-10-08 `6ea6dbb` |
 | P2.3 | 브라우저 재생 클라이언트: `EventSource` + `fetch` 스트림으로 `/chunks` 를 받아 청크 단위로 장면에 넣기, 마크(`snapshot_received`·`presented` 등, 결정 0020 이름) | 14 이벤트 재생. replay ×60 에서 `main_thread_block` 0 회(SPEC §7.1)를 한 번 확인(판정은 P2.5) | [x] 2026-10-08 `42a0911` |
 | P2.4 | WebGPU 가 없을 때 WebGL2(wgpu GL 백엔드)로 대체 | WebGPU 를 끈 Chrome 에서 14 이벤트 재생 + 고정 시점 SSIM 기록. 지원하지 않는 기능이 있으면 결정 기록 | [x] 2026-10-08 `df8182e` |
-| P2.5 | browser 측정 + 비교표 browser 열: three.js · native 와 같은 세션 번갈아(`bench/suite.sh` 확장), WebGPU·WebGL2 둘 다 | `docs/bench/browser.md`. `mem_cpu` 판정은 SPEC 대로 렌더러 프로세스, GPU 프로세스 값을 함께 싣는다(PR #13 검토). wasm 크기·로드 시간 기록 | [ ] |
+| P2.5 | browser 측정 + 비교표 browser 열: three.js · native 와 같은 세션 번갈아(`bench/suite.sh` 확장), WebGPU·WebGL2 둘 다 | `docs/bench/browser.md`. `mem_cpu` 판정은 SPEC 대로 렌더러 프로세스, GPU 프로세스 값을 함께 싣는다(PR #13 검토). wasm 크기·로드 시간 기록 | [x] 2026-10-08 `8de61d8` |
 
 P3 이후는 P2 가 끝나면 쪼갠다.
