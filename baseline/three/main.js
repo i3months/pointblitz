@@ -3,7 +3,7 @@
 // main thread with PLYLoader, and the previous THREE.Points is thrown away.
 //
 // URL parameters:
-//   scenario = replay | cold | orbit   (SPEC §6.1)
+//   scenario = replay | cold | orbit   (SPEC §6.1); memtest | memspike = memory metric self-checks
 //   speed    = replay speed factor (default 60)
 //   view     = viewpoint name to hold (default overview_sw)
 //   frames   = frames per viewpoint in orbit (default 120)
@@ -142,6 +142,22 @@ async function main() {
     mark('alloc_start');
     window.__hold = new Float32Array(50 * 1024 * 1024).fill(1);
     mark('alloc_end', { bytes: window.__hold.byteLength });
+    await new Promise((r) => setTimeout(r, 2000));
+    pb.done = true;
+    return;
+  }
+
+  if (scenario === 'memspike') {
+    // Short-peak self-check (decision 0032): 200 MB filled, then freed ~30 ms later. Transferring
+    // the buffer to length 0 releases its backing store right away, without waiting for GC.
+    await new Promise((r) => setTimeout(r, 3000)); // let the OS sampler (PowerShell) start
+    mark('alloc_start');
+    let buf = new ArrayBuffer(200 * 1024 * 1024);
+    new Uint8Array(buf).fill(1);
+    mark('alloc_end', { bytes: buf.byteLength });
+    await new Promise((r) => setTimeout(r, 30));
+    buf = buf.transfer(0);
+    mark('freed');
     await new Promise((r) => setTimeout(r, 2000));
     pb.done = true;
     return;

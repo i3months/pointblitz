@@ -1,7 +1,7 @@
 // Runs one scenario of a browser implementation in Chrome and writes SPEC §6.2 metrics (P0.5,
 // decision 0020). The same harness measures the three.js baseline and PointBlitz web (P2).
 //
-// usage: node run.mjs --server http://127.0.0.1:8700 --scenario replay|cold|orbit|memtest
+// usage: node run.mjs --server http://127.0.0.1:8700 --scenario replay|cold|orbit|memtest|memspike
 //                     [--speed 60] [--metrics <file.jsonl>] [--raw <file.json>] [--chrome <path>] [--headed]
 //                     [--target three.js|web]   (web = PointBlitz web/index.html; default three.js)
 //
@@ -14,7 +14,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import { execSync } from 'node:child_process';
 import { summarize } from './metrics.mjs';
-import { chromeProcessIds, sampleProcesses } from './procmem.mjs';
+import { chromeProcessIds, peakCommit, sampleProcesses } from './procmem.mjs';
 
 const args = parseArgs();
 const server = args.server ?? 'http://127.0.0.1:8700';
@@ -80,6 +80,15 @@ raw.proc = {
 raw.scenario = scenario;
 raw.speed = speed;
 raw.wall_ms = Date.now() - t0;
+// mem_cpu = peak commit the OS recorded for the renderer (and, separately, the GPU process) over
+// the whole run (decision 0032). Read before closing, while the processes still exist.
+const rendererPids = [...new Set([...procs.renderer, ...after.renderer])];
+const gpuPids = [...new Set([...procs.gpu, ...after.gpu])];
+const peaks = peakCommit([...rendererPids, ...gpuPids]);
+raw.peak = {
+  renderer: Math.max(0, ...rendererPids.map((pid) => peaks[pid] ?? 0)),
+  gpu: Math.max(0, ...gpuPids.map((pid) => peaks[pid] ?? 0)),
+};
 await browser.close();
 
 const sh = (cmd) => {
