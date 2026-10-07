@@ -25,7 +25,11 @@ const scenario = params.get('scenario') ?? 'replay';
 const speed = Number(params.get('speed') ?? 60);
 const framesPerView = Number(params.get('frames') ?? 120);
 
-const pb = (window.__pb = { marks: [], frames: [], ready: false, done: false, setView });
+const pb = (window.__pb = { marks: [], frames: [], longtasks: [], syncFrames: [], ready: false, done: false, setView });
+// Main-thread blocks over 50 ms (SPEC §6.2 main_thread_block).
+new PerformanceObserver((list) => {
+  for (const e of list.getEntries()) pb.longtasks.push({ t: e.startTime, ms: e.duration });
+}).observe({ type: "longtask", buffered: true });
 const mark = (name, extra = {}) => pb.marks.push({ name, t: performance.now(), ...extra });
 
 const renderer = new THREE.WebGLRenderer({ antialias: false, preserveDrawingBuffer: true });
@@ -93,7 +97,9 @@ async function loadSnapshot(ev) {
 }
 
 const pendingPresent = [];
+let stopLoop = false;
 function frame(t) {
+  if (stopLoop) return;
   pb.frames.push(t);
   renderer.render(scene, camera);
   while (pendingPresent.length) mark('presented', { seq: pendingPresent.shift() });
@@ -126,10 +132,24 @@ async function main() {
     mark('snapshot_received', { seq: last.seq, kind: last.kind });
     await loadSnapshot(last);
     if (scenario === 'orbit') {
+      // Synchronised frames (decision 0020): each frame is followed by a 1-pixel readPixels, which
+      // waits for the GPU to finish. rAF intervals do not include GPU work, so they cannot measure
+      // render cost; this does (CPU submit + GPU execution + sync).
+      stopLoop = true;
+      await waitFrames(2);
+      const gl = renderer.getContext();
+      const px = new Uint8Array(4);
       for (const v of viewpoints) {
         setView(v.name);
-        await waitFrames(framesPerView);
+        for (let k = 0; k < framesPerView; k++) {
+          const t = performance.now();
+          renderer.render(scene, camera);
+          gl.readPixels(0, 0, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, px);
+          pb.syncFrames.push({ view: v.name, ms: performance.now() - t });
+        }
       }
+      stopLoop = false;
+      requestAnimationFrame(frame);
     }
     await waitFrames(2);
     pb.done = true;
