@@ -45,6 +45,8 @@ pub enum ChunkError {
     BadMagic,
     UnsupportedVersion(u16),
     BadHeaderLength(u16),
+    UnknownFlags(u32),
+    ReservedNotZero,
     /// Body length does not match the point count.
     BadLength {
         expected: usize,
@@ -153,6 +155,14 @@ pub fn decode_header(bytes: &[u8]) -> Result<ChunkHeader, ChunkError> {
             actual: bytes.len(),
         });
     }
+    // v1 defines one flag bit and zero reserved bytes; anything else is not a v1 chunk (PR #8 review).
+    let flags = u32_at(20);
+    if flags & !FLAG_LAST_IN_GENERATION != 0 {
+        return Err(ChunkError::UnknownFlags(flags));
+    }
+    if bytes[72..80].iter().any(|b| *b != 0) {
+        return Err(ChunkError::ReservedNotZero);
+    }
     Ok(ChunkHeader {
         generation: u32_at(8),
         index: u32_at(12),
@@ -177,25 +187,23 @@ pub fn ply_to_chunks(
     max_points: usize,
 ) -> Result<Vec<Vec<u8>>, crate::PlyError> {
     assert!(max_points > 0);
-    let all: Vec<Point> = crate::ply::points(ply)?.collect();
-    let parts: Vec<&[Point]> = if all.is_empty() {
-        vec![&all[..]]
-    } else {
-        all.chunks(max_points).collect()
-    };
-    let last = parts.len() - 1;
-    Ok(parts
-        .iter()
-        .enumerate()
-        .map(|(i, part)| {
-            let flags = if i == last {
-                FLAG_LAST_IN_GENERATION
-            } else {
-                0
-            };
-            encode(generation, i as u32, flags, part)
-        })
-        .collect())
+    let total = crate::ply::parse_header(ply)?.vertex_count;
+    let mut iter = crate::ply::points(ply)?;
+    // Only one chunk's worth of points is held at a time (PR #8 review).
+    let count = total.div_ceil(max_points).max(1);
+    let mut out = Vec::with_capacity(count);
+    let mut part = Vec::with_capacity(max_points.min(total));
+    for i in 0..count {
+        part.clear();
+        part.extend(iter.by_ref().take(max_points));
+        let flags = if i + 1 == count {
+            FLAG_LAST_IN_GENERATION
+        } else {
+            0
+        };
+        out.push(encode(generation, i as u32, flags, &part));
+    }
+    Ok(out)
 }
 
 #[cfg(test)]
@@ -230,7 +238,8 @@ mod tests {
 
     #[test]
     fn positions_round_trip_far_from_origin() {
-        // 5 km away: relative storage keeps the exact f32 inputs.
+        // 5 km away: these inputs (non-negative, larger than the origin offset) survive exactly; in
+        // general the relative f32 can round — the flight-01 test bounds the error at 1e-5 m.
         let input = pts(100, 5000.0);
         let c = encode(0, 0, 0, &input);
         let h = decode_header(&c).unwrap();
@@ -256,6 +265,12 @@ mod tests {
             decode_header(&c[..c.len() - 1]),
             Err(ChunkError::BadLength { .. })
         ));
+        let mut flags = c.clone();
+        flags[20] = 0b10;
+        assert_eq!(decode_header(&flags), Err(ChunkError::UnknownFlags(2)));
+        let mut reserved = c.clone();
+        reserved[75] = 1;
+        assert_eq!(decode_header(&reserved), Err(ChunkError::ReservedNotZero));
     }
 
     #[test]
