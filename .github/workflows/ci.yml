@@ -45,3 +45,5 @@ jobs:
         run: bash web/build.sh
       - name: size
         run: wc -c web/pkg/*
+      - name: browser client unit tests (node --test)
+        run: node --test web/chunks.test.mjs
