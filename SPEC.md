@@ -221,13 +221,14 @@ PointBlitz 를 재기 전에 정했다. 근거·이유: [docs/ops/reviews/p0-7-t
 | `event_latency` refined p50 | ≤ 200 ms | native · browser | 609.1 ms |
 | cold 마지막 스냅샷 `event_latency` | ≤ 300 ms | native · browser | 882.2 ms |
 | `main_thread_block` | 0 회(`replay` ×60 · `cold`) | browser | 16 회 · 6,305 ms |
-| `mem_cpu` 최대(`replay` ×60) | ≤ 300 MB | browser 렌더러 private / native 프로세스 private | 860.7 MB |
+| `mem_cpu` 최대(`replay` ×60) | **기록만**(2026-10-08 소유자: 메모리 제약 없음) — 이전 감독 값 ≤ 300 MB | browser 렌더러 / native 프로세스, OS 최대 commit(결정 0032) | 860.7 MB(이전 방법) |
 | `frame_time_total` p50 / p95 / p99(`orbit`, 2.5 M 점) | 각각 기준 방식 이하 | native · browser | 2.8 / 3.8 / 6.0 ms |
 
 - `first_frame` 은 보고만 한다.
 - `frame_time` 비교는 두 구현의 점 모양이 같을 때만 유효하다(결정 0025).
 - 서버 영상(P3)의 목표는 P3 착수 때 정한다. 저사양 GPU 는 비용 모델(결정 0011)로 추정해 보고한다.
 - 대역폭(`bytes_total`)은 목표가 아니라 기록이다(INTENT 원칙 2).
+- 메모리(`mem_cpu`, `mem_gpu`)도 목표가 아니라 기록이다(2026-10-08 소유자 결정: "메모리는 무조건 많이 써도 된다"). 메모리를 줄이려고 속도·지연을 내주는 선택은 하지 않는다.
 - 소유자가 다른 값을 정하면 그 값이 우선한다(§9 에 기록).
 
 
@@ -255,3 +256,4 @@ PointBlitz 를 재기 전에 정했다. 근거·이유: [docs/ops/reviews/p0-7-t
 | 2026-10-07 | 초판. 범위·입력·아키텍처·기준 방식·측정·단계 | 프로젝트 소유자 |
 | 2026-10-07 | §2.2 합계 바이트 정정(530,814,804 → 530,796,804, PR #1 검토 H1), §6.3 RTX 4070 용량 12 GB 명시 | 프로젝트 소유자 |
 | 2026-10-07 | §7.1 목표 수치(P0.7) 추가 | 감독(소유자 위임) |
+| 2026-10-08 | §7.1 `mem_cpu` 를 목표에서 기록만으로(이전 목표 ≤ 300 MB 는 표에 남김). 이유: 메모리는 대역폭처럼 제약이 아니다. INTENT 원칙 2 에 메모리 추가. 참고: P1.5 native `mem_cpu` 미달(348.6 MB, 이전 방법)과 결정 0032 의 재측정 필요가 알려진 뒤의 변경이다 | 프로젝트 소유자(채팅) |
