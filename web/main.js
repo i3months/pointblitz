@@ -83,6 +83,7 @@ async function deliver(snap) {
   let bytes = 0;
   let first = true;
   let uploadMs = 0;
+  let chunkMaxMs = 0; // longest single chunk on the main thread (PR #16 review: must stay < 50 ms)
   let lastSeen = false;
   const splitter = new ChunkSplitter((chunk, last) => {
     const t0 = performance.now();
@@ -92,11 +93,13 @@ async function deliver(snap) {
     }
     if (last) mark('last_chunk_received', { seq: snap.seq });
     viewer.insert(chunk);
-    uploadMs += performance.now() - t0;
+    const ms = performance.now() - t0;
+    uploadMs += ms;
+    chunkMaxMs = Math.max(chunkMaxMs, ms);
     dirty = true; // progressive first generation and appends are visible right away
     if (last) {
       lastSeen = true;
-      mark('uploaded', { seq: snap.seq, points: viewer.points(), gpu_bytes: viewer.gpu_bytes(), upload_ms: uploadMs });
+      mark('uploaded', { seq: snap.seq, points: viewer.points(), gpu_bytes: viewer.gpu_bytes(), upload_ms: uploadMs, chunk_max_ms: chunkMaxMs });
       toPresent.push(snap.seq);
     }
   });
