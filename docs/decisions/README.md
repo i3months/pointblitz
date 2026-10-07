@@ -26,7 +26,7 @@
 | [0020](0020-measurement-method.md) | 측정 방법: 무엇을 어떻게 재는가 | 승인 |
 | [0021](0021-measure-with-vsync-on.md) | 측정 기본은 vsync 켬(0020 vsync 행 대체) | 승인 |
 | [0022](0022-chunk-format-v1.md) | 청크 형식 v1 세부 | 승인 |
-| [0023](0023-skyrecon-dev-dependency.md) | skyrecon-core 개발 의존성, 리비전 고정 | 제안 |
-| [0024](0024-core-render-design.md) | 렌더 코어 설계(P1.2) | 제안 |
+| [0023](0023-skyrecon-dev-dependency.md) | skyrecon-core 개발 의존성, 리비전 고정 | 승인 |
+| [0024](0024-core-render-design.md) | 렌더 코어 설계(P1.2) | 승인 |
 
 "제안" 상태는 작업자가 제안한 것이다. 감독 검토 또는 소유자 확인 뒤 "승인" 이 된다.
