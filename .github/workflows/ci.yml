@@ -30,3 +30,18 @@ jobs:
         run: cargo test --workspace
       - name: wasm check
         run: cargo check --target wasm32-unknown-unknown -p pointblitz-io -p pointblitz-core -p pointblitz-web
+
+  wasm:
+    # Browser target (P2.1, decision 0028): wasm build + wasm-bindgen, size reported.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install toolchain from rust-toolchain.toml
+        run: rustup show active-toolchain || rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+      - name: wasm-bindgen CLI (must equal the crate version)
+        run: cargo install wasm-bindgen-cli --version 0.2.129 --locked
+      - name: build
+        run: bash web/build.sh
+      - name: size
+        run: wc -c web/pkg/*

@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>PointBlitz</title>
+<link rel="icon" href="data:,">
+<style>html, body { margin: 0; background: #000; } canvas { display: block; width: 1920px; height: 1080px; }</style>
+</head>
+<body>
+<canvas id="view" width="1920" height="1080"></canvas>
+<script type="module">
+// P2.1: load the wasm module and report the WebGPU adapter (decision 0028).
+import init, { adapter_info } from './pkg/pointblitz_web.js';
+const pb = (window.__pb = { marks: [], ready: false, done: false });
+const mark = (name, extra = {}) => pb.marks.push({ name, t: performance.now(), ...extra });
+try {
+  mark('wasm_init_start');
+  await init();
+  mark('wasm_init_end');
+  pb.adapter = JSON.parse(await adapter_info(document.getElementById('view')));
+  // WebGPU does not give wgpu the adapter name; the browser's GPUAdapter.info says which GPU it is.
+  const a = await navigator.gpu.requestAdapter({ powerPreference: 'high-performance' });
+  pb.gpu = a && { vendor: a.info.vendor, architecture: a.info.architecture, device: a.info.device, description: a.info.description };
+  mark('adapter', { adapter: pb.adapter, gpu: pb.gpu });
+} catch (e) {
+  pb.error = String(e);
+  mark('error', { message: pb.error });
+}
+pb.ready = pb.done = true;
+</script>
+</body>
+</html>
