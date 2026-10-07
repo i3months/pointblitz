@@ -1,36 +1,56 @@
-// PointBlitz in the browser (P2, decisions 0028, 0029): the wasm viewer on a WebGPU canvas.
+// PointBlitz in the browser (P2, decisions 0028, 0029, 0030): the wasm viewer on a WebGPU canvas.
 //
 // URL parameters:
-//   scenario = check | still     check: report the adapter only (P2.1)
-//                                still: load the last snapshot as one full delivery, then hold
-//                                       (fixed-viewpoint captures, P2.2)
+//   scenario = check | still | replay | cold
+//     check   report the adapter only (P2.1)
+//     still   load the last snapshot, then hold (fixed-viewpoint captures, P2.2)
+//     replay  follow /events like the native client (decision 0026), chunks streamed as they arrive
+//     cold    only the last snapshot of the manifest, as one full delivery
+//   speed    = replay speed factor (default 60)
 //   view     = viewpoint to start at (default overview_sw)
 //
-// Hooks on window.__pb (read by bench/web/*.mjs): marks [{name, t, ...}], info, gpu,
-// setView(name) → resolves when that view is drawn and the GPU is done, ready, done.
+// Hooks on window.__pb (read by bench/web/*.mjs and the baseline harness): marks [{name, t, ...}],
+// frames [t], longtasks [{t, ms}], info, gpu, setView(name), ready, done. Mark names follow the
+// baseline and the native client (decision 0020): snapshot_received, fetch_start, headers,
+// first_chunk, last_chunk_received, uploaded, submitted, presented, fetch_end.
 
 import init, { Viewer } from './pkg/pointblitz_web.js';
+import { ChunkSplitter } from './chunks.js';
 
 const params = new URLSearchParams(location.search);
 const scenario = params.get('scenario') ?? 'still';
-const pb = (window.__pb = { marks: [], ready: false, done: false, setView });
+const speed = Number(params.get('speed') ?? 60);
+const pb = (window.__pb = { marks: [], frames: [], longtasks: [], syncFrames: [], ready: false, done: false, setView });
 const mark = (name, extra = {}) => pb.marks.push({ name, t: performance.now(), ...extra });
+// Main-thread blocks over 50 ms (SPEC §6.2 main_thread_block), same observer as the baseline.
+new PerformanceObserver((list) => {
+  for (const e of list.getEntries()) pb.longtasks.push({ t: e.startTime, ms: e.duration });
+}).observe({ type: 'longtask', buffered: true });
 
 let viewer = null;
 let viewpoints = [];
 let fov = 50;
 let dirty = false;
 let waiters = [];
+let toPresent = []; // snapshots whose last chunk is in the scene but not drawn yet
 
 // Draw only when something changed (decision 0027); the loop itself costs nothing when idle.
-function frame() {
+function frame(t) {
+  pb.frames.push(t);
   if (dirty && viewer) {
     dirty = false;
     viewer.render();
+    const seqs = toPresent;
+    toPresent = [];
+    for (const seq of seqs) mark('submitted', { seq });
     const done = viewer.gpu_done();
     const w = waiters;
     waiters = [];
-    for (const resolve of w) done.then(resolve);
+    // presented = the GPU finished the first frame that shows the whole snapshot (decision 0020).
+    done.then(() => {
+      for (const seq of seqs) mark('presented', { seq });
+      for (const resolve of w) resolve();
+    });
   }
   requestAnimationFrame(frame);
 }
@@ -49,16 +69,91 @@ async function setView(name) {
   mark('view', { view: name });
 }
 
-/** Splits a delivery body into chunks (decision 0022: point_count at byte 16, 80 B + 16 B/point). */
-export function splitChunks(buf) {
-  const view = new DataView(buf);
-  const out = [];
-  for (let off = 0; off + 80 <= buf.byteLength; ) {
-    const len = 80 + 16 * view.getUint32(off + 16, true);
-    out.push(new Uint8Array(buf, off, len));
-    off += len;
+let have = null; // [generation, points] the scene holds (decision 0026)
+
+/** Fetches one snapshot's chunks and puts each into the scene as soon as it is complete. */
+async function deliver(snap) {
+  const q = have ? `?have=${have[0]}.${have[1]}` : '';
+  mark('fetch_start', { seq: snap.seq });
+  const res = await fetch(`/chunks/${snap.seq}${q}`, { cache: 'no-store' });
+  if (!res.ok) throw new Error(`chunks ${snap.seq}: ${res.status}`);
+  const delivery = res.headers.get('X-PB-Delivery');
+  const generation = Number(res.headers.get('X-PB-Generation'));
+  mark('headers', { seq: snap.seq });
+  let bytes = 0;
+  let first = true;
+  let uploadMs = 0;
+  let lastSeen = false;
+  const splitter = new ChunkSplitter((chunk, last) => {
+    const t0 = performance.now();
+    if (first) {
+      first = false;
+      mark('first_chunk', { seq: snap.seq });
+    }
+    if (last) mark('last_chunk_received', { seq: snap.seq });
+    viewer.insert(chunk);
+    uploadMs += performance.now() - t0;
+    dirty = true; // progressive first generation and appends are visible right away
+    if (last) {
+      lastSeen = true;
+      mark('uploaded', { seq: snap.seq, points: viewer.points(), gpu_bytes: viewer.gpu_bytes(), upload_ms: uploadMs });
+      toPresent.push(snap.seq);
+    }
+  });
+  const reader = res.body.getReader();
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    bytes += value.length;
+    splitter.push(value);
   }
-  return out;
+  if (!lastSeen) throw new Error(`chunks ${snap.seq}: delivery ended without its last chunk`);
+  have = [generation, snap.points];
+  mark('fetch_end', { seq: snap.seq, bytes, delivery, generation });
+  mark('delivered', { seq: snap.seq, bytes, delivery, generation });
+}
+
+/** Resolves when every delivered snapshot has been presented. */
+function allPresented() {
+  return new Promise((resolve) => {
+    const check = () => {
+      const want = pb.marks.filter((m) => m.name === 'uploaded').length;
+      const got = pb.marks.filter((m) => m.name === 'presented').length;
+      if (got >= want && toPresent.length === 0) resolve();
+      else requestAnimationFrame(check);
+    };
+    check();
+  });
+}
+
+async function replay() {
+  // Snapshots are fetched strictly in order, like the native client; event times are stamped the
+  // moment the message arrives, so a delivery in progress does not delay them.
+  let chain = Promise.resolve();
+  await new Promise((resolve, reject) => {
+    const es = new EventSource(`/events?speed=${speed}`);
+    es.addEventListener('snapshot', (m) => {
+      const snap = JSON.parse(m.data);
+      mark('snapshot_received', { seq: snap.seq, kind: snap.kind });
+      chain = chain.then(() => deliver(snap));
+      chain.catch(reject);
+    });
+    es.addEventListener('end', () => {
+      es.close();
+      chain.then(resolve, reject);
+    });
+    es.onerror = () => {
+      if (es.readyState === EventSource.CLOSED) reject(new Error('event stream closed'));
+    };
+  });
+  await allPresented();
+}
+
+async function cold(manifest) {
+  const last = manifest[manifest.length - 1];
+  mark('snapshot_received', { seq: last.seq, kind: last.kind });
+  await deliver(last);
+  await allPresented();
 }
 
 async function main() {
@@ -77,15 +172,14 @@ async function main() {
   const vp = await (await fetch('/static/bench/viewpoints/flight-01.json')).json();
   viewpoints = vp.viewpoints;
   fov = vp.camera.fov_y_deg;
-  const manifest = (await (await fetch('/manifest.json')).json()).events;
-  const last = manifest[manifest.length - 1];
-  mark('fetch_start', { seq: last.seq });
-  const body = await (await fetch(`/chunks/${last.seq}`, { cache: 'no-store' })).arrayBuffer();
-  mark('fetch_end', { seq: last.seq, bytes: body.byteLength });
-  for (const c of splitChunks(body)) viewer.insert(c);
-  mark('uploaded', { seq: last.seq, points: viewer.points(), gpu_bytes: viewer.gpu_bytes() });
   await setView(params.get('view') ?? 'overview_sw');
-  mark('presented', { seq: last.seq });
+  const manifest = (await (await fetch('/manifest.json')).json()).events;
+  mark('start', { scenario });
+  pb.ready = true;
+
+  if (scenario === 'replay') await replay();
+  else if (scenario === 'cold' || scenario === 'still') await cold(manifest);
+  else throw new Error(`unknown scenario ${scenario}`);
 }
 
 main()
