@@ -84,7 +84,13 @@ async function loadSnapshot(ev) {
   const buf = await res.arrayBuffer();
   mark('fetch_end', { seq: ev.seq, bytes: buf.byteLength });
   const geometry = loader.parse(buf);
-  mark('parse_end', { seq: ev.seq, points: geometry.getAttribute('position').count });
+  const attributeNames = Object.keys(geometry.attributes);
+  mark('parse_end', {
+    seq: ev.seq,
+    points: geometry.getAttribute('position').count,
+    attributes: attributeNames.length,
+    attributeNames: attributeNames.join(','),
+  });
   if (points) {
     scene.remove(points);
     points.geometry.dispose();
@@ -97,12 +103,20 @@ async function loadSnapshot(ev) {
 }
 
 const pendingPresent = [];
+const syncPixel = new Uint8Array(4);
 let stopLoop = false;
 function frame(t) {
   if (stopLoop) return;
   pb.frames.push(t);
   renderer.render(scene, camera);
-  while (pendingPresent.length) mark('presented', { seq: pendingPresent.shift() });
+  if (pendingPresent.length) {
+    // The first frame that contains a new snapshot is synchronised once (decision 0020): 'submitted'
+    // is when render() returned, 'presented' is when the GPU finished drawing it. One sync per
+    // snapshot (14 per flight) — a measurement artefact, applied identically to every implementation.
+    for (const seq of pendingPresent) mark('submitted', { seq });
+    renderer.getContext().readPixels(0, 0, 1, 1, WebGL2RenderingContext.RGBA, WebGL2RenderingContext.UNSIGNED_BYTE, syncPixel);
+    while (pendingPresent.length) mark('presented', { seq: pendingPresent.shift() });
+  }
   requestAnimationFrame(frame);
 }
 
@@ -134,18 +148,20 @@ async function main() {
     if (scenario === 'orbit') {
       // Synchronised frames (decision 0020): each frame is followed by a 1-pixel readPixels, which
       // waits for the GPU to finish. rAF intervals do not include GPU work, so they cannot measure
-      // render cost; this does (CPU submit + GPU execution + sync).
+      // render cost. cpu = render() call alone (command recording + submit); total = cpu + GPU
+      // execution + sync; gpu_estimate = total − cpu.
       stopLoop = true;
       await waitFrames(2);
       const gl = renderer.getContext();
-      const px = new Uint8Array(4);
       for (const v of viewpoints) {
         setView(v.name);
         for (let k = 0; k < framesPerView; k++) {
-          const t = performance.now();
+          const t0 = performance.now();
           renderer.render(scene, camera);
-          gl.readPixels(0, 0, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, px);
-          pb.syncFrames.push({ view: v.name, ms: performance.now() - t });
+          const t1 = performance.now();
+          gl.readPixels(0, 0, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, syncPixel);
+          const t2 = performance.now();
+          pb.syncFrames.push({ view: v.name, cpu: t1 - t0, ms: t2 - t0 });
         }
       }
       stopLoop = false;

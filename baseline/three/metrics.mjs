@@ -67,14 +67,29 @@ export function summarize(raw, { device, commit, target = 'three.js' }) {
   }
 
   // Synchronised render time per frame at each fixed viewpoint (orbit scenario, decision 0020).
+  // render_time = CPU submit + GPU execution + sync; render_cpu = render() call alone;
+  // render_gpu_estimate = render_time − render_cpu (includes the readPixels round trip).
   const sync = raw.syncFrames ?? [];
   if (sync.length) {
-    const all = sync.map((f) => f.ms).sort((a, b) => a - b);
-    for (const q of [0.5, 0.95, 0.99]) out.push(rec(`render_time_p${Math.round(q * 100)}`, percentile(all, q), "ms", all.length));
+    const series = {
+      render_time: sync.map((f) => f.ms),
+      render_cpu: sync.map((f) => f.cpu),
+      render_gpu_estimate: sync.map((f) => f.ms - f.cpu),
+    };
+    for (const [name, values] of Object.entries(series)) {
+      const s = values.sort((a, b) => a - b);
+      for (const q of [0.5, 0.95, 0.99]) out.push(rec(`${name}_p${Math.round(q * 100)}`, percentile(s, q), 'ms', s.length));
+    }
     for (const view of [...new Set(sync.map((f) => f.view))]) {
       const v = sync.filter((f) => f.view === view).map((f) => f.ms).sort((a, b) => a - b);
-      out.push(rec("render_time_p50_view", percentile(v, 0.5), "ms", v.length, { view }));
+      out.push(rec('render_time_p50_view', percentile(v, 0.5), 'ms', v.length, { view }));
     }
+  }
+
+  // Event latency split: submitted (render() returned) vs presented (GPU done) for the swap frame.
+  for (const s of by('submitted')) {
+    const p = by('presented').find((m) => m.seq === s.seq);
+    if (p) out.push(rec('swap_frame_gpu_wait', p.t - s.t, 'ms', 1, { seq: s.seq }));
   }
 
   // Main-thread blocks over 50 ms.
@@ -82,10 +97,16 @@ export function summarize(raw, { device, commit, target = 'three.js' }) {
   out.push(rec('main_thread_block_ms', longtasks.reduce((a, l) => a + l.ms, 0), 'ms', longtasks.length));
 
   // Memory: JS heap peak (CDP samples). GPU memory is not observable from a page; record the
-  // attribute bytes three.js uploads (position f32×3 + color f32×3) as an estimate.
+  // attribute bytes three.js uploads as an estimate. PLYLoader keeps the file's normals as a
+  // third float32 attribute, so it uploads position + normal + color = 36 B/point (PR #5 review).
   if (heap.length) out.push(rec('mem_js_heap_max', Math.max(...heap), 'B', heap.length));
-  const lastPoints = by('parse_end').at(-1)?.points;
-  if (lastPoints) out.push(rec('mem_gpu_estimate', lastPoints * 24, 'B', 1, { method: 'points × 24 B (position+color float32)' }));
+  const last = by('parse_end').at(-1);
+  if (last?.points) {
+    const perPoint = 12 * (last.attributes ?? 3);
+    out.push(rec('mem_gpu_estimate', last.points * perPoint, 'B', 1, {
+      method: `points × ${perPoint} B (${last.attributeNames ?? 'position,normal,color'} float32×3)`,
+    }));
+  }
 
   out.push(rec('stage_fetch_total', stage.fetch.reduce((a, b) => a + b, 0), 'ms', stage.fetch.length));
   out.push(rec('stage_parse_total', stage.parse.reduce((a, b) => a + b, 0), 'ms', stage.parse.length));

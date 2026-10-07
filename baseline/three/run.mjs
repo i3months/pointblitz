@@ -6,29 +6,22 @@
 // Raw hooks come from window.__pb (marks, frames, longtasks); JS heap is sampled over CDP.
 
 import { chromium } from 'playwright-core';
+import { parseArgs, chromeArgs, CHROME } from './args.mjs';
 import fs from 'node:fs';
 import os from 'node:os';
 import { execSync } from 'node:child_process';
 import { summarize } from './metrics.mjs';
 
-const args = {};
-for (let i = 2; i < process.argv.length; i++) {
-  const a = process.argv[i];
-  if (a.startsWith('--')) args[a.slice(2)] = process.argv[i + 1]?.startsWith('--') ? true : process.argv[++i] ?? true;
-}
+const args = parseArgs();
 const server = args.server ?? 'http://127.0.0.1:8700';
 const scenario = args.scenario ?? 'replay';
 const speed = Number(args.speed ?? 60);
-const chrome = args.chrome ?? 'C:/Program Files/Google/Chrome/Application/chrome.exe';
+const chrome = args.chrome ?? CHROME;
 
 const browser = await chromium.launch({
   executablePath: chrome,
   headless: !args.headed,
-  args: [
-    '--use-angle=d3d11', '--enable-gpu', '--ignore-gpu-blocklist', '--window-size=1920,1080',
-    // Uncapped frames: without these, rAF runs at the display rate and frame_time shows vsync, not render cost.
-    ...(args.vsync ? [] : ['--disable-gpu-vsync', '--disable-frame-rate-limit']),
-  ],
+  args: chromeArgs(args),
 });
 const page = await browser.newPage({ viewport: { width: 1920, height: 1080 }, deviceScaleFactor: 1 });
 page.on('console', (m) => m.type() === 'error' && !m.text().includes('404') && console.error('page:', m.text()));

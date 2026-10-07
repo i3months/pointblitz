@@ -20,15 +20,36 @@ P0.5. SPEC §6.2 지표를 브라우저(기준 방식)에서 뽑는다. 같은 �
 | vsync | 켬 / **끔(기본)** | 끔 | 켜면 모든 구현이 16.7 ms 로 같아 보인다. 사용자 체감 비교가 필요하면 `--vsync` 로 따로 잰다 |
 | 메인 스레드 블록 | DevTools 트레이스 / **`PerformanceObserver('longtask')`** | longtask | 표준 API, 50 ms 넘는 작업을 시작·길이로 준다. 트레이스는 파일이 크고 해석이 무겁다 |
 | 메모리 | `performance.memory` / **CDP `Performance.getMetrics` 250 ms 표본(JSHeapUsedSize)** | CDP | 페이지 코드와 무관하게 표본을 뜬다 |
-| GPU 메모리 | 측정 / **추정(점 수 × 속성 바이트)** | 추정, `method` 필드에 표시 | 페이지에서 GPU 메모리를 잴 방법이 없다. three.js 는 위치·색을 float32 로 올리므로 점당 24 B. PointBlitz native 는 실제 버퍼 크기를 기록한다 |
-| 이벤트 반영 시간 | 다운로드 끝까지 / **알림 받음 → 그 점이 보이는 첫 프레임** | 후자 | 사용자가 체감하는 지연. 단계별(다운로드·해석) 시간도 함께 기록한다 |
+| GPU 메모리 | 측정 / **추정(점 수 × 속성 바이트)** | 추정, `method` 필드에 표시 | 페이지에서 GPU 메모리를 잴 방법이 없다. `PLYLoader` 는 파일의 법선까지 float32 속성으로 만들어 위치·법선·색 점당 **36 B** 를 올린다(PR #5 검토). 속성 이름을 `parse_end` 표식에 기록해 계산한다. PointBlitz 는 법선을 기본으로 보내지 않으므로(결정 0008) 이 차이는 비교표에 원인으로 적는다. PointBlitz native 는 실제 버퍼 크기를 기록한다 |
+| 이벤트 반영 시간 | 다운로드 끝까지 / render() 반환까지 / **알림 받음 → 그 점을 담은 첫 프레임의 GPU 완료** | 마지막 | 사용자가 체감하는 지연. 새 스냅샷을 담은 첫 프레임에서만 한 번 동기화(1 px 읽기)해 `submitted`(render 반환)와 `presented`(GPU 완료)를 나눈다(PR #5 검토 — render() 직후 표식은 GPU 완료가 아니다). 비행당 14 회뿐인 측정 인공물이고 모든 구현에 같게 적용한다. 차이는 `swap_frame_gpu_wait` 로 남는다 — three.js 는 이 프레임에서 정점 버퍼를 GPU 로 올리므로 업로드 비용이 여기 보인다 |
 | 첫 화면 | 서버 시작부터 / **페이지 탐색 시작(performance.now 0)부터 첫 점 프레임** | 후자 | 브라우저 표준 기준점 |
 | 지표 기록 | 사람용 표 / **JSON Lines `{metric, value, unit, target, device, scenario, commit, samples}`** | JSONL | 결정 0011 비용 모델과 비교표 생성이 같은 레코드를 읽는다. `device` 에 렌더러 문자열·브라우저·CPU·OS 를 넣는다 |
+
+## 무엇을 재는가 (PR #5 검토 질문에 대한 답)
+
+| 지표 | 재는 것 | 사용자가 겪는 것인가 |
+|---|---|---|
+| `frame_time_p*` | rAF 간격(vsync 끔). 메인 스레드가 프레임을 얼마나 자주 돌리는가 | 예 — 끊김·멈춤 |
+| `render_time_p*` | 동기화 프레임: CPU 명령 기록·제출 + GPU 실행 + 동기화 왕복 | 아니오 — 그리기 비용의 측정용 값(파이프라이닝 없음) |
+| `render_cpu_p*` | render() 호출 시간(명령 기록·제출) | 메인 스레드 몫 |
+| `render_gpu_estimate_p*` | `render_time − render_cpu`. GPU 실행 + readPixels 왕복 | GPU 몫의 상한 추정 |
+| `event_latency` | 알림 → 그 점을 담은 첫 프레임 GPU 완료 | 예 |
+| `main_thread_block_*` | 50 ms 넘는 메인 스레드 작업 | 예 — 입력이 먹히지 않는 시간 |
+
+**CPU·GPU 나누기(SPEC §6.2):** GPU 타이머 쿼리를 브라우저에서 쓸 수 없어(보안상 비활성) GPU 시간을 직접 재지 못한다.
+대신 같은 프레임에서 `render()` 반환 시각과 동기화 완료 시각을 재서 CPU 몫과 나머지(GPU + 동기화 왕복, 상한)로 나눈다.
+`performance.now()` 해상도가 0.1 ms(교차 출처 격리 꺼짐)라 CPU 몫이 0.1 ms 미만이면 0 으로 보인다.
+
+**PointBlitz 에 같은 방법을 적용하는 법:**
+- native(wgpu): CPU 몫 = 명령 인코딩 + `queue.submit` 반환까지, 총 = `device.poll(Wait)` 반환까지. wgpu 타임스탬프 쿼리를 쓸 수 있으면 GPU 시간을 직접 함께 기록한다.
+- browser(WebGPU): CPU 몫 = 인코딩 + `submit`, 총 = `queue.onSubmittedWorkDone()` 해결까지. WebGL2 대체 경로는 three.js 와 같은 1 px `readPixels`.
+- server: native 와 같고, 인코딩(NVENC) 시간을 따로 더한다.
 
 ## 결과 예 (이 PC, RTX 4070, Chrome 155, 한 번 실행 — 정식 반복 측정은 P0.6)
 
 - `cold`: bytes_total 67,554,652 B, event_latency 902 ms(다운로드 127 ms + 해석 736 ms), 메인 스레드 블록 2 회 826 ms, JS 힙 최대 386 MB.
-- `orbit` 동기화 프레임: 250만 점 render_time p50 2.8 ms(시점별 2.0~3.4 ms), p99 4.8 ms.
+- `orbit` 동기화 프레임: 250만 점 render_time p50 2.7 ms(시점별 2.0~2.9 ms), p99 5.9 ms. render_cpu p50 < 0.1 ms, render_gpu_estimate p50 2.7 ms.
+- `cold` 교체 프레임: `swap_frame_gpu_wait` 12.3 ms(정점 버퍼 90 MB 업로드 포함), mem_gpu_estimate 90,072,540 B(250만 점 × 36 B).
 
 해석: 이 GPU 에서 기준 방식의 **그리기는 이미 빠르고, 비용은 받기·해석·업로드(약 0.9 s, 그동안 메인 스레드 정지)에 몰려 있다.**
 PointBlitz 가 이길 곳은 주로 갱신 경로(결정 0008·0009)이고, 그리기 차이는 저사양 GPU(비용 모델) 쪽에서 커질 수 있다.

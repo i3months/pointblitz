@@ -159,9 +159,14 @@ pub fn parse_request_line(line: &str) -> Option<Request> {
 }
 
 /// Joins a URL path below `root`, refusing anything that would escape it.
+/// Hidden entries (`.git`, `.github`, …) are refused too: the web root is often the repository root.
 pub fn safe_join(root: &Path, rel: &str) -> Option<PathBuf> {
     let rel = Path::new(rel);
-    if rel.components().any(|c| !matches!(c, Component::Normal(_))) {
+    let hidden_or_escaping = |c: Component| match c {
+        Component::Normal(name) => name.to_string_lossy().starts_with('.'),
+        _ => true,
+    };
+    if rel.components().any(hidden_or_escaping) {
         return None;
     }
     Some(root.join(rel))
@@ -402,6 +407,8 @@ mod tests {
         );
         assert_eq!(safe_join(root, "../secret"), None);
         assert_eq!(safe_join(root, "/etc/passwd"), None);
+        assert_eq!(safe_join(root, ".git/config"), None);
+        assert_eq!(safe_join(root, "baseline/.hidden"), None);
     }
 
     #[test]
