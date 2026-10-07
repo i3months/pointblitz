@@ -1,0 +1,1 @@
+//! PointBlitz browser target (wasm)

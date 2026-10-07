@@ -1,0 +1,15 @@
+[package]
+name = "pointblitz-native"
+description = "PointBlitz native window target"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+pointblitz-core.workspace = true
+
+[lints]
+workspace = true

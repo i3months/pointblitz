@@ -19,5 +19,6 @@
 | [0013](0013-coordinate-conventions.md) | 좌표 규약 | 승인 |
 | [0014](0014-ply-parser.md) | PLY 파서를 직접 둔다 | 승인 |
 | [0015](0015-license.md) | 라이선스: MIT OR Apache-2.0 | 승인 |
+| [0016](0016-toolchain-workspace-ci.md) | 툴체인·워크스페이스·CI | 승인 |
 
 "제안" 상태는 작업자가 제안한 것이다. 감독 검토 또는 소유자 확인 뒤 "승인" 이 된다.
