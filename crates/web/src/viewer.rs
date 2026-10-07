@@ -52,9 +52,11 @@ impl Viewer {
     ///
     /// `backend`: `auto` (WebGPU when the browser has it, otherwise WebGL2), `webgpu` or `webgl`.
     /// A canvas keeps the first context type it was given, so the choice is made before the surface.
+    /// `memory_hints`: `performance` (wgpu default) or `memory` (allocator favours memory).
     pub async fn create(
         canvas: web_sys::HtmlCanvasElement,
         backend: String,
+        memory_hints: String,
     ) -> Result<Viewer, JsValue> {
         let (w, h) = (canvas.width().max(1), canvas.height().max(1));
         let webgpu = match backend.as_str() {
@@ -90,7 +92,11 @@ impl Viewer {
         let info = adapter.get_info();
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {
-                memory_hints: wgpu::MemoryHints::MemoryUsage,
+                memory_hints: if memory_hints == "memory" {
+                    wgpu::MemoryHints::MemoryUsage
+                } else {
+                    wgpu::MemoryHints::Performance
+                },
                 // WebGL2 cannot meet wgpu's default limits; ask only for what WebGL2 guarantees,
                 // raised to the adapter's texture sizes.
                 required_limits: if webgpu {

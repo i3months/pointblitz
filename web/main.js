@@ -23,6 +23,7 @@ const params = new URLSearchParams(location.search);
 const scenario = params.get('scenario') ?? 'still';
 const speed = Number(params.get('speed') ?? 60);
 const backend = params.get('backend') ?? 'auto';
+const memoryHints = params.get('memory') ?? 'memory'; // A/B: memory | performance (decision 0034)
 const pkgDir = params.get('pkg') === 'webgpu' ? './pkg-webgpu/' : './pkg/';
 let Viewer = null;
 const pb = (window.__pb = { marks: [], frames: [], longtasks: [], syncFrames: [], ready: false, done: false, setView });
@@ -214,7 +215,7 @@ async function main() {
   Viewer = mod.Viewer;
   mark('wasm_init_end');
   mark('viewer_create_start');
-  viewer = await Viewer.create(document.getElementById('view'), backend);
+  viewer = await Viewer.create(document.getElementById('view'), backend, memoryHints);
   mark('viewer_create_end');
   pb.info = JSON.parse(viewer.info());
   // WebGPU does not give wgpu the adapter name; the browser's GPUAdapter.info says which GPU it is.

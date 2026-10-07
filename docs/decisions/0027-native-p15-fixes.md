@@ -14,7 +14,7 @@ P1.5 첫 측정(만든 그대로, `target/bench/p15a`)에서 SPEC §7.1 목표 �
 | # | 문제(실측) | 고친 것 | A/B (같은 세션, 번갈아) |
 |---|---|---|---|
 | 1 | 매 프레임 그리는 루프가 스왑체인 이미지 획득에서 vsync 까지 창 스레드를 막는다. 그동안 도착한 청크가 큐에서 기다린다(preview: 마지막 청크 → 장면 반영 10.4 ms, 반영 → 표시 21.4 ms) | **바뀐 것이 있을 때만 그린다**(청크 도착, 카메라, 창 크기). `--continuous` 로 이전 동작 | replay ×60 preview p50 **40.6 → 22.5 ms**, refined p50 169.4 → 161.5 ms (3 회씩) |
-| 2 | wgpu 기본 할당(`MemoryHints::Performance`)이 큰 메모리 블록을 잡는다 | **`MemoryHints::MemoryUsage`**. `--memory-hints performance` 로 이전 동작 | cold mem_cpu **391~396 → 264~282 MB**, 지연은 실행 간 범위 안(3 회씩) |
+| 2 | **(결정 0034 로 대체: 메모리가 아니라 속도로 고름, 차이 없음 → 유지)** wgpu 기본 할당(`MemoryHints::Performance`)이 큰 메모리 블록을 잡는다 | **`MemoryHints::MemoryUsage`**. `--memory-hints performance` 로 이전 동작 | cold mem_cpu **391~396 → 264~282 MB**, 지연은 실행 간 범위 안(3 회씩) |
 | 3 | 차분 전달도 PLY 파일 전체를 읽는다(25~37 ms, PR #12 검토 중간 2) | 헤더(64 KiB)만 읽고 보낼 레코드 위치로 건너뛰어 그만큼만 읽는다 | 서버 쪽 #13 차분 **36.0 → 1.1 ms**. 응답 바이트는 기준 함수(`ply_tail_to_chunks`)와 바이트 단위로 같다(#1 전체, #13 차분, #14 전체 확인) |
 | 4 | 전체 전달의 청크 인코딩이 한 스레드 | 청크를 코어 수만큼 병렬로 인코딩하고 순서대로 보낸다(`encode_records`, `chunk_records`) | #14 인코딩 35.3 → 7.1 ms(단독 측정). 전송 전체는 거의 그대로 — 아래 "남은 것" |
 
