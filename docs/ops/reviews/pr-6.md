@@ -63,3 +63,26 @@ CDP `Performance.getMetrics` 의 `JSHeapUsedSize` 를 감독이 직접 실험했
 
 - PR #5 지적을 모두 반영했다. 교체 프레임만 동기화하고, 법선 36 B 를 반영하고, 숨김 경로를 거부하고, favicon 과 인자 해석을 정리했다.
 - 결정 0020 의 "무엇을 재는가" 표와 PointBlitz 적용법이 명확하다.
+
+## 재검토 (2026-10-07, 대상 커밋 `55d6622`) — 통과
+
+GPU 가 비어 있을 때 감독이 직접 다시 돌렸다(Chrome 155, RTX 4070, 재생 서버는 이름을 바꾼 복사본).
+
+| 확인 | 결과 |
+|---|---|
+| H1 `mem_cpu` | `memtest`: `memtest_cpu_delta` 220,790,784 B(할당 209,715,200 B), `memtest_js_heap_max` 5,527,692 B. 렌더러 private bytes 가 typed array 를 잡는다. `cold` 의 `mem_cpu` 는 617.5 MB, JS 힙은 363.8 MB |
+| H2 이름 | `frame_time_total/cpu/gpu_estimate_p*` 는 동기화 프레임 값이다(orbit p50 2.8 ms, p95 4.8 ms, 시점별 2.0~3.5 ms). rAF 간격은 `frame_interval_*` 로 바뀌었다. 0020 에 SPEC 대응 열이 있다 |
+| 중간 2건 | 동기화 구간 longtask 를 뺀다(orbit `main_thread_block` 은 해석 1 건 716 ms 만 남음). `event_latency` 가 보수적이라는 문구도 있다 |
+| 낮음 3건 | `git describe --dirty`, `gpu_driver`, 404 필터 제거 — 반영 |
+| `cold` | event_latency 880.3 ms, swap_frame_gpu_wait 12.9 ms, main_thread_block 3 회 859 ms — PR 수치와 같은 범위 |
+| 숨김 경로 | `/static/.git/config` → 404 |
+| 시험 | `cargo test` 17 통과 |
+
+### 새로 기록 (중간·낮음 — P0.6 PR 에서 먼저 고친다)
+
+| 수준 | 내용 |
+|---|---|
+| 중간 | **orbit 의 `event_latency`·`first_frame`·`frame_interval_max` 가 측정기 버그로 부풀려진다.** `loadSnapshot` 직후 `stopLoop = true` 가 되어 `frame()` 이 교체 프레임을 처리하지 못하고, `presented` 가 동기화 루프(약 2.8 s)가 끝난 뒤에야 찍힌다. 재현 값: event_latency 3,619.9 ms, first_frame 3,670.7 ms, frame_interval_max 3,526 ms. cold 는 880 ms 다. SPEC 비교표는 `first_frame` 을 cold 에서, `event_latency` 를 replay 에서 가져오므로 표에 들어갈 값은 오염되지 않는다. 그래서 반려하지 않는다. P0.6 PR 에서 교체 프레임을 먼저 반영한 뒤 동기화 루프를 시작하도록 고치고, 그 전에 orbit 에서 이 세 지표를 보고하지 않는다. |
+| 중간 | 프로세스 메모리 표본은 `page.goto` 가 끝난 뒤 시작한다(이번 실행에서 탐색 후 0.3~0.4 s). three.js 는 해석이 0.9 s 라 최대값을 잡지만, PointBlitz 처럼 빠른 구현은 초기 최대값을 놓칠 수 있다. PointBlitz browser 측정 전에 탐색 전부터 표본을 뜨도록 바꾼다(사이트 격리로 렌더러 pid 가 바뀌는 것도 따라간다). |
+| 낮음 | orbit 의 `mem_gpu_process_private_max` 가 2.47 GB 다(cold 0.59 GB). 동기화 루프 960 프레임 동안 GPU 프로세스 메모리가 커진다. SPEC 지표가 아니라 막지 않지만, 해석할 때 주의한다. |
+| 낮음 | 0020 선택지 표의 "반응성" 행이 아직 `frame_time_*` 라고 적혀 있다 → `frame_interval_*`. |
