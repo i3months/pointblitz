@@ -58,23 +58,27 @@ export function summarize(raw, { device, commit, target = 'three.js' }) {
   const firstPresent = by('presented')[0];
   if (firstPresent) out.push(rec('first_frame', firstPresent.t, 'ms'));
 
-  // Frame intervals (requestAnimationFrame deltas): main-thread responsiveness, not GPU cost.
+  // Frame intervals (requestAnimationFrame deltas): main-thread responsiveness, not render cost.
+  // Named frame_interval_* — SPEC frame_time is the synchronised frame below (PR #6 review H2).
   const deltas = [];
   for (let i = 1; i < frames.length; i++) deltas.push(frames[i] - frames[i - 1]);
   deltas.sort((a, b) => a - b);
   for (const q of [0.5, 0.95, 0.99]) {
-    out.push(rec(`frame_time_p${Math.round(q * 100)}`, percentile(deltas, q), 'ms', deltas.length));
+    out.push(rec(`frame_interval_p${Math.round(q * 100)}`, percentile(deltas, q), 'ms', deltas.length));
+  }
+  if (deltas.length) {
+    out.push(rec('frame_interval_max', deltas[deltas.length - 1], 'ms', deltas.length));
   }
 
-  // Synchronised render time per frame at each fixed viewpoint (orbit scenario, decision 0020).
-  // render_time = CPU submit + GPU execution + sync; render_cpu = render() call alone;
-  // render_gpu_estimate = render_time − render_cpu (includes the readPixels round trip).
+  // SPEC §6.2 frame_time (CPU and GPU separately) = synchronised frames at each fixed viewpoint
+  // (orbit scenario, decision 0020): frame_time_total = CPU submit + GPU execution + sync;
+  // frame_time_cpu = render() call alone; frame_time_gpu_estimate = total − cpu (upper bound).
   const sync = raw.syncFrames ?? [];
   if (sync.length) {
     const series = {
-      render_time: sync.map((f) => f.ms),
-      render_cpu: sync.map((f) => f.cpu),
-      render_gpu_estimate: sync.map((f) => f.ms - f.cpu),
+      frame_time_total: sync.map((f) => f.ms),
+      frame_time_cpu: sync.map((f) => f.cpu),
+      frame_time_gpu_estimate: sync.map((f) => f.ms - f.cpu),
     };
     for (const [name, values] of Object.entries(series)) {
       const s = values.sort((a, b) => a - b);
@@ -82,7 +86,7 @@ export function summarize(raw, { device, commit, target = 'three.js' }) {
     }
     for (const view of [...new Set(sync.map((f) => f.view))]) {
       const v = sync.filter((f) => f.view === view).map((f) => f.ms).sort((a, b) => a - b);
-      out.push(rec('render_time_p50_view', percentile(v, 0.5), 'ms', v.length, { view }));
+      out.push(rec('frame_time_total_p50_view', percentile(v, 0.5), 'ms', v.length, { view }));
     }
   }
 
@@ -92,13 +96,37 @@ export function summarize(raw, { device, commit, target = 'three.js' }) {
     if (p) out.push(rec('swap_frame_gpu_wait', p.t - s.t, 'ms', 1, { seq: s.seq }));
   }
 
-  // Main-thread blocks over 50 ms.
-  out.push(rec('main_thread_block_count', longtasks.length, 'count'));
-  out.push(rec('main_thread_block_ms', longtasks.reduce((a, l) => a + l.ms, 0), 'ms', longtasks.length));
+  // Main-thread blocks over 50 ms. Long tasks inside the orbit sync loop are a measurement
+  // artefact (120 synchronised frames per task) and are excluded (PR #6 review).
+  const syncWindows = by('sync_start').map((s) => [s.t, by('sync_end').find((e) => e.t >= s.t)?.t ?? Infinity]);
+  const blocks = longtasks.filter((l) => !syncWindows.some(([a, b]) => l.t >= a - 1 && l.t <= b));
+  out.push(rec('main_thread_block_count', blocks.length, 'count'));
+  out.push(rec('main_thread_block_ms', blocks.reduce((a, l) => a + l.ms, 0), 'ms', blocks.length));
 
   // Memory: JS heap peak (CDP samples). GPU memory is not observable from a page; record the
   // attribute bytes three.js uploads as an estimate. PLYLoader keeps the file's normals as a
   // third float32 attribute, so it uploads position + normal + color = 36 B/point (PR #5 review).
+  // mem_cpu = renderer process private bytes from the OS (includes ArrayBuffer, typed arrays and
+  // wasm memory, which JSHeapUsedSize does not count — PR #6 review H1). JS heap stays as a
+  // secondary metric. The GPU process figure is reported separately.
+  const proc = raw.proc ?? { renderer: [], gpu: [] };
+  if (proc.renderer.length) {
+    out.push(rec('mem_cpu', Math.max(...proc.renderer.map((s) => s.private)), 'B', proc.renderer.length, { method: 'renderer process private bytes (max of 250 ms samples)' }));
+    if (scenario === 'memtest') {
+      // Self-check: private bytes just before vs after holding the 200 MB Float32Array.
+      const a = by('alloc_start')[0], e = by('alloc_end')[0];
+      const at = (m) => raw.timeOrigin + m.t;
+      const before = proc.renderer.filter((x) => x.ts < at(a)).map((x) => x.private);
+      const after = proc.renderer.filter((x) => x.ts > at(e) + 250).map((x) => x.private);
+      if (before.length && after.length) {
+        out.push(rec('memtest_cpu_delta', Math.max(...after) - before[before.length - 1], 'B', after.length, { allocated: e.bytes }));
+        const hb = heap.length ? heap : [0];
+        out.push(rec('memtest_js_heap_max', Math.max(...hb), 'B', hb.length));
+      }
+    }
+    out.push(rec('mem_renderer_working_set_max', Math.max(...proc.renderer.map((s) => s.working)), 'B', proc.renderer.length));
+  }
+  if (proc.gpu.length) out.push(rec('mem_gpu_process_private_max', Math.max(...proc.gpu.map((s) => s.private)), 'B', proc.gpu.length));
   if (heap.length) out.push(rec('mem_js_heap_max', Math.max(...heap), 'B', heap.length));
   const last = by('parse_end').at(-1);
   if (last?.points) {

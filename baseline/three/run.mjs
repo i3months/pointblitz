@@ -1,9 +1,10 @@
 // Runs one baseline scenario in Chrome and writes SPEC §6.2 metrics (P0.5, decision 0020).
 //
-// usage: node run.mjs --server http://127.0.0.1:8700 --scenario replay|cold|orbit [--speed 60]
-//                     [--metrics <file.jsonl>] [--raw <file.json>] [--chrome <path>] [--headed]
+// usage: node run.mjs --server http://127.0.0.1:8700 --scenario replay|cold|orbit|memtest
+//                     [--speed 60] [--metrics <file.jsonl>] [--raw <file.json>] [--chrome <path>] [--headed]
 //
-// Raw hooks come from window.__pb (marks, frames, longtasks); JS heap is sampled over CDP.
+// Raw hooks come from window.__pb (marks, frames, longtasks, syncFrames). Memory: JS heap over CDP
+// (secondary) and renderer / GPU process private bytes from the OS (mem_cpu, procmem.mjs).
 
 import { chromium } from 'playwright-core';
 import { parseArgs, chromeArgs, CHROME } from './args.mjs';
@@ -11,6 +12,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import { execSync } from 'node:child_process';
 import { summarize } from './metrics.mjs';
+import { chromeProcessIds, sampleProcesses } from './procmem.mjs';
 
 const args = parseArgs();
 const server = args.server ?? 'http://127.0.0.1:8700';
@@ -24,7 +26,7 @@ const browser = await chromium.launch({
   args: chromeArgs(args),
 });
 const page = await browser.newPage({ viewport: { width: 1920, height: 1080 }, deviceScaleFactor: 1 });
-page.on('console', (m) => m.type() === 'error' && !m.text().includes('404') && console.error('page:', m.text()));
+page.on('console', (m) => m.type() === 'error' && console.error('page:', m.text()));
 
 const cdp = await page.context().newCDPSession(page);
 await cdp.send('Performance.enable');
@@ -39,10 +41,14 @@ const sampler = setInterval(async () => {
 
 const t0 = Date.now();
 await page.goto(`${server}/static/baseline/three/index.html?scenario=${scenario}&speed=${speed}`);
+const procs = await chromeProcessIds(browser);
+const stopProc = sampleProcesses([...procs.renderer, ...procs.gpu]);
 await page.waitForFunction(() => window.__pb?.done, null, { timeout: 3_600_000, polling: 500 });
 clearInterval(sampler);
+const procSamples = stopProc();
 
 const raw = await page.evaluate(() => ({
+  timeOrigin: performance.timeOrigin,
   marks: window.__pb.marks,
   frames: window.__pb.frames,
   longtasks: window.__pb.longtasks,
@@ -54,19 +60,28 @@ const renderer = await page.evaluate(() => {
   return ext ? gl.getParameter(ext.UNMASKED_RENDERER_WEBGL) : gl.getParameter(gl.RENDERER);
 });
 raw.heap = heap;
+raw.proc = {
+  renderer: procs.renderer.flatMap((pid) => procSamples[pid] ?? []),
+  gpu: procs.gpu.flatMap((pid) => procSamples[pid] ?? []),
+};
 raw.scenario = scenario;
 raw.speed = speed;
 raw.wall_ms = Date.now() - t0;
 await browser.close();
 
-let commit = 'unknown';
-try {
-  commit = execSync('git rev-parse --short HEAD').toString().trim();
-} catch {}
+const sh = (cmd) => {
+  try {
+    return execSync(cmd, { stdio: ['ignore', 'pipe', 'ignore'] }).toString().trim();
+  } catch {
+    return 'unknown';
+  }
+};
+const commit = sh('git describe --always --dirty --abbrev=7');
 const device = {
   impl: 'three.js 0.185.1',
   browser: `Chrome ${browser.version()}`,
   renderer,
+  gpu_driver: sh('nvidia-smi --query-gpu=driver_version --format=csv,noheader'),
   cpu: os.cpus()[0].model.trim(),
   os: `${os.type()} ${os.release()}`,
 };
@@ -75,5 +90,5 @@ if (args.raw) fs.writeFileSync(args.raw, JSON.stringify(raw));
 const records = summarize(raw, { device, commit });
 if (args.metrics) fs.writeFileSync(args.metrics, records.map((r) => JSON.stringify(r)).join('\n') + '\n');
 for (const r of records) {
-  console.log(`${r.metric.padEnd(28)} ${String(r.value).padStart(14)} ${r.unit}`);
+  console.log(`${r.metric.padEnd(30)} ${String(r.value).padStart(14)} ${r.unit}`);
 }

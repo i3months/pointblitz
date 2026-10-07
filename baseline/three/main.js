@@ -128,6 +128,18 @@ async function main() {
   mark('start', { scenario });
   pb.ready = true;
 
+  if (scenario === 'memtest') {
+    // Memory metric self-check (decision 0020): hold a 200 MB Float32Array; mem_cpu must rise by
+    // about that much while JSHeapUsedSize does not.
+    await new Promise((r) => setTimeout(r, 3000)); // let the OS sampler (PowerShell) start
+    mark('alloc_start');
+    window.__hold = new Float32Array(50 * 1024 * 1024).fill(1);
+    mark('alloc_end', { bytes: window.__hold.byteLength });
+    await new Promise((r) => setTimeout(r, 2000));
+    pb.done = true;
+    return;
+  }
+
   if (scenario === 'replay') {
     // Snapshots are processed strictly in order; a slow parse delays the next one, as in the app.
     let chain = Promise.resolve();
@@ -153,6 +165,7 @@ async function main() {
       stopLoop = true;
       await waitFrames(2);
       const gl = renderer.getContext();
+      mark('sync_start');
       for (const v of viewpoints) {
         setView(v.name);
         for (let k = 0; k < framesPerView; k++) {
@@ -164,6 +177,7 @@ async function main() {
           pb.syncFrames.push({ view: v.name, cpu: t1 - t0, ms: t2 - t0 });
         }
       }
+      mark('sync_end');
       stopLoop = false;
       requestAnimationFrame(frame);
     }
