@@ -95,6 +95,30 @@ pub struct Header {
     pub normal: Option<[usize; 3]>,
 }
 
+impl Header {
+    /// Bytes of vertex data, checked against overflow (hostile headers, 32-bit wasm).
+    pub fn body_len(&self) -> Result<usize, PlyError> {
+        self.vertex_count
+            .checked_mul(self.stride)
+            .ok_or_else(|| PlyError::BadHeader("vertex count × stride overflows".into()))
+    }
+
+    /// Decodes one vertex record of `self.stride` bytes.
+    pub fn point(&self, rec: &[u8]) -> Point {
+        let f = |o: usize| f32::from_le_bytes([rec[o], rec[o + 1], rec[o + 2], rec[o + 3]]);
+        Point {
+            position: [
+                f(self.position[0]),
+                f(self.position[1]),
+                f(self.position[2]),
+            ],
+            color: self
+                .color
+                .map_or([255, 255, 255], |c| [rec[c[0]], rec[c[1]], rec[c[2]]]),
+        }
+    }
+}
+
 /// One point as read from the file.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Point {
@@ -103,7 +127,25 @@ pub struct Point {
     pub color: [u8; 3],
 }
 
-const END_HEADER: &[u8] = b"end_header\n";
+const END_HEADER: &[u8] = b"end_header";
+
+/// Finds the `end_header` line, accepting `\n` or `\r\n` line endings, starting the search at
+/// `from` so incremental callers do not rescan. Returns (start of the keyword, header length).
+pub(crate) fn find_end_header(bytes: &[u8], from: usize) -> Option<(usize, usize)> {
+    let mut at = from.min(bytes.len());
+    while let Some(i) = find(&bytes[at..], END_HEADER) {
+        let start = at + i;
+        let after = start + END_HEADER.len();
+        match &bytes[after..] {
+            [b'\n', ..] => return Some((start, after + 1)),
+            [b'\r', b'\n', ..] => return Some((start, after + 2)),
+            // The line ending has not arrived yet: the caller needs more bytes.
+            [] | [b'\r'] => return None,
+            _ => at = after,
+        }
+    }
+    None
+}
 
 /// Parses the header at the start of `bytes`.
 ///
@@ -113,8 +155,7 @@ pub fn parse_header(bytes: &[u8]) -> Result<Header, PlyError> {
     if bytes.len() >= 4 && &bytes[..4] != b"ply\n" && &bytes[..4] != b"ply\r" {
         return Err(PlyError::NotPly);
     }
-    let end = find(bytes, END_HEADER).ok_or(PlyError::Incomplete)?;
-    let header_len = end + END_HEADER.len();
+    let (end, header_len) = find_end_header(bytes, 0).ok_or(PlyError::Incomplete)?;
     let text = std::str::from_utf8(&bytes[..end])
         .map_err(|_| PlyError::BadHeader("header is not UTF-8".into()))?;
 
@@ -175,6 +216,15 @@ pub fn parse_header(bytes: &[u8]) -> Result<Header, PlyError> {
     let pos =
         |n: &'static str| find_prop(&[n], ScalarType::F32).ok_or(PlyError::MissingProperty(n));
     let position = [pos("x")?, pos("y")?, pos("z")?];
+    // Colors must be uint8. Other types (e.g. float 0..1) are reported instead of silently turning
+    // white (PR #3 review).
+    if let Some((name, ty, _)) = props.iter().find(|(n, t, _)| {
+        ["red", "green", "blue", "r", "g", "b"].contains(&n.as_str()) && *t != ScalarType::U8
+    }) {
+        return Err(PlyError::UnsupportedProperty(format!(
+            "{name}: color must be uint8, got {ty:?}"
+        )));
+    }
     let color = match (
         find_prop(&["red", "r"], ScalarType::U8),
         find_prop(&["green", "g"], ScalarType::U8),
@@ -206,22 +256,16 @@ pub fn parse_header(bytes: &[u8]) -> Result<Header, PlyError> {
 pub fn points(bytes: &[u8]) -> Result<impl Iterator<Item = Point> + '_, PlyError> {
     let h = parse_header(bytes)?;
     let body = &bytes[h.header_len..];
-    let expected = h.vertex_count * h.stride;
+    let expected = h.body_len()?;
     if body.len() < expected {
         return Err(PlyError::Truncated {
             expected,
             actual: body.len(),
         });
     }
-    Ok(body[..expected].chunks_exact(h.stride).map(move |rec| {
-        let f = |o: usize| f32::from_le_bytes([rec[o], rec[o + 1], rec[o + 2], rec[o + 3]]);
-        Point {
-            position: [f(h.position[0]), f(h.position[1]), f(h.position[2])],
-            color: h
-                .color
-                .map_or([255, 255, 255], |c| [rec[c[0]], rec[c[1]], rec[c[2]]]),
-        }
-    }))
+    Ok(body[..expected]
+        .chunks_exact(h.stride)
+        .map(move |rec| h.point(rec)))
 }
 
 fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
@@ -319,6 +363,54 @@ mod tests {
             points(&bytes).unwrap().next().unwrap().color,
             [255, 255, 255]
         );
+    }
+
+    #[test]
+    fn accepts_crlf_header() {
+        let bytes = b"ply\r\nformat binary_little_endian 1.0\r\nelement vertex 1\r\n\
+            property float x\r\nproperty float y\r\nproperty float z\r\nend_header\r\n\
+            \0\0\x80\x3f\0\0\0\x40\0\0\x40\x40";
+        let h = parse_header(bytes).unwrap();
+        assert_eq!(h.header_len, bytes.len() - 12);
+        assert_eq!(
+            points(bytes).unwrap().next().unwrap().position,
+            [1.0, 2.0, 3.0]
+        );
+    }
+
+    #[test]
+    fn end_header_split_across_pieces_is_incomplete_not_wrong() {
+        let full = ply(
+            "property float32 x\nproperty float32 y\nproperty float32 z\n",
+            &[],
+        );
+        let cut = full.len() - 1; // "end_header" without its newline
+        assert_eq!(parse_header(&full[..cut]), Err(PlyError::Incomplete));
+        let crlf = b"ply\r\nformat binary_little_endian 1.0\r\nelement vertex 0\r\nend_header\r";
+        assert_eq!(parse_header(crlf), Err(PlyError::Incomplete));
+    }
+
+    #[test]
+    fn rejects_non_uint8_color() {
+        let props = "property float32 x\nproperty float32 y\nproperty float32 z\n\
+            property float red\nproperty float green\nproperty float blue\n";
+        assert!(matches!(
+            parse_header(&ply(props, &[])),
+            Err(PlyError::UnsupportedProperty(_))
+        ));
+    }
+
+    #[test]
+    fn overflowing_vertex_count_is_an_error() {
+        let bytes = format!(
+            "ply\nformat binary_little_endian 1.0\nelement vertex {}\n\
+             property float x\nproperty float y\nproperty float z\nend_header\n",
+            usize::MAX / 4
+        );
+        assert!(matches!(
+            points(bytes.as_bytes()).err(),
+            Some(PlyError::BadHeader(_))
+        ));
     }
 
     #[test]

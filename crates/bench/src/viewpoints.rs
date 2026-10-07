@@ -153,7 +153,7 @@ pub fn run(input: &str, output: &str) -> Result<(), String> {
         .file_name()
         .map_or(input.into(), |n| n.to_string_lossy());
     writeln!(json, "{{").unwrap();
-    writeln!(json, "  \"source\": \"{source}\",").unwrap();
+    writeln!(json, "  \"source\": \"{}\",", json_escape(&source)).unwrap();
     writeln!(json, "  \"points\": {},", pts.len()).unwrap();
     writeln!(json, "  \"frame\": \"ENU\",").unwrap();
     writeln!(
@@ -202,6 +202,20 @@ pub fn run(input: &str, output: &str) -> Result<(), String> {
     }
 }
 
+/// Escapes a string for a JSON string literal (file names may contain quotes or backslashes).
+fn json_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out
+}
+
 fn arr(v: [f64; 3]) -> String {
     format!("[{:.3}, {:.3}, {:.3}]", v[0], v[1], v[2])
 }
@@ -246,6 +260,12 @@ mod tests {
             }
         }
         v
+    }
+
+    #[test]
+    fn escapes_json_strings() {
+        assert_eq!(json_escape(r#"a"b\c"#), r#"a\"b\\c"#);
+        assert_eq!(json_escape("x\ny"), "x\\u000ay");
     }
 
     #[test]
