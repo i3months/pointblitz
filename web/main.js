@@ -10,19 +10,21 @@
 //   speed    = replay speed factor (default 60)
 //   view     = viewpoint to start at (default overview_sw)
 //   backend  = auto | webgpu | webgl   (auto: WebGPU when available, otherwise WebGL2 — P2.4)
+//   pkg      = full | webgpu           (webgpu: the WebGPU-only module, 0.37 MB instead of 4.25 MB — decision 0033)
 //
 // Hooks on window.__pb (read by bench/web/*.mjs and the baseline harness): marks [{name, t, ...}],
 // frames [t], longtasks [{t, ms}], info, gpu, setView(name), ready, done. Mark names follow the
 // baseline and the native client (decision 0020): snapshot_received, fetch_start, headers,
 // first_chunk, last_chunk_received, uploaded, submitted, presented, fetch_end.
 
-import init, { Viewer } from './pkg/pointblitz_web.js';
 import { ChunkSplitter } from './chunks.js';
 
 const params = new URLSearchParams(location.search);
 const scenario = params.get('scenario') ?? 'still';
 const speed = Number(params.get('speed') ?? 60);
 const backend = params.get('backend') ?? 'auto';
+const pkgDir = params.get('pkg') === 'webgpu' ? './pkg-webgpu/' : './pkg/';
+let Viewer = null;
 const pb = (window.__pb = { marks: [], frames: [], longtasks: [], syncFrames: [], ready: false, done: false, setView });
 const mark = (name, extra = {}) => pb.marks.push({ name, t: performance.now(), ...extra });
 // Main-thread blocks over 50 ms (SPEC §6.2 main_thread_block), same observer as the baseline.
@@ -48,14 +50,17 @@ function frame(t) {
     const seqs = toPresent;
     toPresent = [];
     for (const seq of seqs) mark('submitted', { seq });
-    const done = viewer.gpu_done();
     const w = waiters;
     waiters = [];
     // presented = the GPU finished the first frame that shows the whole snapshot (decision 0020).
-    done.then(() => {
-      for (const seq of seqs) mark('presented', { seq });
-      for (const resolve of w) resolve();
-    });
+    // Only asked for when someone waits: Chrome keeps memory per onSubmittedWorkDone after a frame
+    // (decision 0033), so ordinary frames do not call it.
+    if (seqs.length || w.length) {
+      viewer.gpu_done().then(() => {
+        for (const seq of seqs) mark('presented', { seq });
+        for (const resolve of w) resolve();
+      });
+    }
   }
   requestAnimationFrame(frame);
 }
@@ -164,41 +169,34 @@ async function cold(manifest) {
   await allPresented();
 }
 
-/** Yields to the event loop without timer clamping (setTimeout nests to ≥ 4 ms). */
-function yieldNow() {
-  return new Promise((resolve) => {
-    const ch = new MessageChannel();
-    ch.port1.onmessage = () => resolve();
-    ch.port2.postMessage(0);
-  });
-}
-
-/** Waits for the GPU to finish what was submitted, polling for WebGL2 (decision 0031). */
-async function gpuFinished() {
-  let done = false;
-  viewer.gpu_done().then(() => (done = true));
-  while (!done) {
-    viewer.poll();
-    await yieldNow();
-  }
-}
-
-// Synchronised frames (decision 0020), like the baseline and native orbit: cpu = render() call
-// (encode + submit); total = until the GPU reports the work done. The browser has no blocking
-// readback for WebGPU, so "done" is queue.onSubmittedWorkDone (WebGL2: fence, polled) — it can add
-// a little dispatch latency, so total is an upper bound (decision 0032).
+// Synchronised frames (decision 0020), like the baseline and native orbit, drawn offscreen like
+// native (decision 0033). cpu = render_offscreen() call (encode + submit); total = until the GPU is
+// done. WebGL2: a 1-pixel readPixels on the same context, exactly the baseline's sync (a WebGL fence
+// only reports at frame boundaries, ~16.7 ms). WebGPU: the frame's first pixel is copied to a
+// small buffer and mapped (mapAsync resolves only after the GPU finished the frame) — the WebGPU counterpart of
+// readPixels; the asynchronous resolution makes total an upper bound.
 async function orbit() {
   const framesPerView = Number(params.get('frames') ?? 120);
   for (let i = 0; i < 3; i++) await redraw(); // let the swapped snapshot reach the screen first
   stopLoop = true;
+  const gl = pb.info.backend === 'Gl' ? document.getElementById('view').getContext('webgl2') : null;
+  const syncPixel = new Uint8Array(4);
   mark('sync_start');
   for (const v of viewpoints) {
     viewer.set_camera(new Float64Array(v.eye), new Float64Array(v.target), new Float64Array(v.up), fov);
     for (let k = 0; k < framesPerView; k++) {
       const t0 = performance.now();
-      viewer.render();
+      viewer.render_offscreen();
       const t1 = performance.now();
-      await gpuFinished();
+      if (gl) {
+        // Read from the default framebuffer, then restore wgpu's binding.
+        const bound = gl.getParameter(gl.READ_FRAMEBUFFER_BINDING);
+        gl.bindFramebuffer(gl.READ_FRAMEBUFFER, null);
+        gl.readPixels(0, 0, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, syncPixel);
+        gl.bindFramebuffer(gl.READ_FRAMEBUFFER, bound);
+      } else {
+        await viewer.readback_done();
+      }
       const t2 = performance.now();
       pb.syncFrames.push({ view: v.name, cpu: t1 - t0, ms: t2 - t0 });
     }
@@ -208,10 +206,16 @@ async function orbit() {
 }
 
 async function main() {
-  mark('wasm_init_start');
-  await init();
+  // Start-up split into marks (PR #18 review): module download + compile + instantiate, then the
+  // viewer (context, device, pipeline).
+  mark('wasm_init_start', { pkg: pkgDir });
+  const mod = await import(`${pkgDir}pointblitz_web.js`);
+  await mod.default();
+  Viewer = mod.Viewer;
   mark('wasm_init_end');
+  mark('viewer_create_start');
   viewer = await Viewer.create(document.getElementById('view'), backend);
+  mark('viewer_create_end');
   pb.info = JSON.parse(viewer.info());
   // WebGPU does not give wgpu the adapter name; the browser's GPUAdapter.info says which GPU it is.
   const a = navigator.gpu && pb.info.backend === 'BrowserWebGpu' ? await navigator.gpu.requestAdapter({ powerPreference: 'high-performance' }) : null;

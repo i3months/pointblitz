@@ -17,6 +17,10 @@ pub struct Viewer {
     scene: Scene,
     camera: Camera,
     adapter: String,
+    /// Offscreen target of the canvas size and format for synchronised frames (orbit).
+    offscreen: Option<(wgpu::Texture, wgpu::TextureView)>,
+    /// One pixel of the last offscreen frame is copied here; mapping it waits for the GPU.
+    readback: Option<wgpu::Buffer>,
 }
 
 fn err(what: &str, e: impl std::fmt::Display) -> JsValue {
@@ -56,6 +60,12 @@ impl Viewer {
         let webgpu = match backend.as_str() {
             "webgpu" => true,
             "webgl" => false,
+            #[cfg(not(feature = "webgl"))]
+            "auto" | "" if !wgpu::util::is_browser_webgpu_supported().await => {
+                return Err(JsValue::from_str(
+                    "no WebGPU, and this module was built without WebGL2",
+                ));
+            }
             "auto" | "" => wgpu::util::is_browser_webgpu_supported().await,
             other => return Err(JsValue::from_str(&format!("unknown backend {other}"))),
         };
@@ -121,6 +131,8 @@ impl Viewer {
             scene: Scene::new(),
             camera: Camera::new([0.0, -10.0, 10.0], [0.0; 3], [0.0, 0.0, 1.0], 50.0),
             adapter,
+            offscreen: None,
+            readback: None,
         })
     }
 
@@ -147,6 +159,91 @@ impl Viewer {
     pub fn set_camera(&mut self, eye: &[f64], target: &[f64], up: &[f64], fov_y_deg: f64) {
         let v = |a: &[f64]| [a[0], a[1], a[2]];
         self.camera = Camera::new(v(eye), v(target), v(up), fov_y_deg);
+    }
+
+    /// Draws one frame into an offscreen texture of the canvas size and format, copies its first
+    /// pixel to a small readback buffer, and submits (synchronised frames, decision 0033). Nothing
+    /// is presented, so the canvas is not touched — drawing many frames to the canvas in one
+    /// animation frame made Chrome allocate a new canvas texture each time (1.8–3.1 GB in the first
+    /// P2.5 run). Wait for the GPU with [`Viewer::readback_done`].
+    pub fn render_offscreen(&mut self) {
+        let (w, h) = (self.config.width, self.config.height);
+        let format = self.config.format;
+        let device = &self.device;
+        let (texture, view) = self.offscreen.get_or_insert_with(|| {
+            let texture = device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("offscreen"),
+                size: wgpu::Extent3d {
+                    width: w,
+                    height: h,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+                view_formats: &[],
+            });
+            let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+            (texture, view)
+        });
+        let readback = self.readback.get_or_insert_with(|| {
+            device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("sync pixel"),
+                size: 256,
+                usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+                mapped_at_creation: false,
+            })
+        });
+        let mut enc = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
+        self.renderer.render(
+            &self.device,
+            &self.queue,
+            &mut enc,
+            view,
+            &self.depth,
+            [w, h],
+            &self.camera,
+            &self.scene,
+        );
+        enc.copy_texture_to_buffer(
+            texture.as_image_copy(),
+            wgpu::TexelCopyBufferInfo {
+                buffer: readback,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(256),
+                    rows_per_image: Some(1),
+                },
+            },
+            wgpu::Extent3d {
+                width: 1,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
+        );
+        self.queue.submit([enc.finish()]);
+    }
+
+    /// Resolves when the last offscreen frame is finished: maps the one-pixel readback, which the
+    /// GPU can only hand over after the frame — the WebGPU counterpart of the baseline's 1-pixel
+    /// readPixels (decision 0033). Used instead of `gpu_done` for many frames in a row: Chrome kept
+    /// about 1.9 MB per `onSubmittedWorkDone` after a frame (2 GB over 960 frames).
+    pub fn readback_done(&self) -> js_sys::Promise {
+        let Some(buffer) = self.readback.clone() else {
+            return js_sys::Promise::reject(&JsValue::from_str("no offscreen frame yet"));
+        };
+        let signal = Signal::default();
+        let fire = signal.clone();
+        buffer.map_async(wgpu::MapMode::Read, .., move |_| fire.fire());
+        wasm_bindgen_futures::future_to_promise(async move {
+            signal.await;
+            buffer.unmap();
+            Ok(JsValue::UNDEFINED)
+        })
     }
 
     /// Draws one frame to the canvas.
