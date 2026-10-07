@@ -52,7 +52,14 @@ function diskTexture() {
   g.beginPath();
   g.arc(32, 32, 32, 0, Math.PI * 2);
   g.fill();
-  return new THREE.CanvasTexture(c);
+  const tex = new THREE.CanvasTexture(c);
+  // No mipmaps (decision 0025): at 2 px the mip chain averages the disk with its transparent
+  // (black) corners and darkens every point by ~10 %. The base level keeps the PLY colour exact.
+  if (params.get('mipmaps') === '1') return tex; // A/B only: the old, darkening behaviour
+  tex.generateMipmaps = false;
+  tex.minFilter = THREE.NearestFilter;
+  tex.magFilter = THREE.NearestFilter;
+  return tex;
 }
 const material = new THREE.PointsMaterial({
   size: POINT_SIZE_PX,
