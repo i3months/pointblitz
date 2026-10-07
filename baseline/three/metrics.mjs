@@ -20,6 +20,7 @@ export function summarize(raw, { device, commit, target = 'three.js' }) {
     target,
     device,
     scenario,
+    speed: scenario === 'replay' ? raw.speed : undefined,
     commit,
     samples,
     ...extra,
@@ -60,8 +61,14 @@ export function summarize(raw, { device, commit, target = 'three.js' }) {
 
   // Frame intervals (requestAnimationFrame deltas): main-thread responsiveness, not render cost.
   // Named frame_interval_* — SPEC frame_time is the synchronised frame below (PR #6 review H2).
+  // Intervals that span the orbit sync loop (rAF loop stopped on purpose) are excluded.
+  const syncSpans = by('sync_start').map((s) => [s.t, by('sync_end').find((e) => e.t >= s.t)?.t ?? Infinity]);
   const deltas = [];
-  for (let i = 1; i < frames.length; i++) deltas.push(frames[i] - frames[i - 1]);
+  for (let i = 1; i < frames.length; i++) {
+    const [a, b] = [frames[i - 1], frames[i]];
+    if (syncSpans.some(([s, e]) => a < e && b > s)) continue;
+    deltas.push(b - a);
+  }
   deltas.sort((a, b) => a - b);
   for (const q of [0.5, 0.95, 0.99]) {
     out.push(rec(`frame_interval_p${Math.round(q * 100)}`, percentile(deltas, q), 'ms', deltas.length));
@@ -98,8 +105,7 @@ export function summarize(raw, { device, commit, target = 'three.js' }) {
 
   // Main-thread blocks over 50 ms. Long tasks inside the orbit sync loop are a measurement
   // artefact (120 synchronised frames per task) and are excluded (PR #6 review).
-  const syncWindows = by('sync_start').map((s) => [s.t, by('sync_end').find((e) => e.t >= s.t)?.t ?? Infinity]);
-  const blocks = longtasks.filter((l) => !syncWindows.some(([a, b]) => l.t >= a - 1 && l.t <= b));
+  const blocks = longtasks.filter((l) => !syncSpans.some(([a, b]) => l.t >= a - 1 && l.t <= b));
   out.push(rec('main_thread_block_count', blocks.length, 'count'));
   out.push(rec('main_thread_block_ms', blocks.reduce((a, l) => a + l.ms, 0), 'ms', blocks.length));
 

@@ -162,8 +162,11 @@ async function main() {
       // waits for the GPU to finish. rAF intervals do not include GPU work, so they cannot measure
       // render cost. cpu = render() call alone (command recording + submit); total = cpu + GPU
       // execution + sync; gpu_estimate = total − cpu.
+      // Let the normal loop present the swapped snapshot first (its presented mark must not wait for
+      // the sync loop — PR #6 review), then stop it for the synchronised frames.
+      await waitFrames(3);
       stopLoop = true;
-      await waitFrames(2);
+      await waitFrames(1);
       const gl = renderer.getContext();
       mark('sync_start');
       for (const v of viewpoints) {

@@ -25,8 +25,9 @@ const records = fs
 
 const groups = new Map();
 for (const r of records) {
-  const key = [r.scenario, r.metric, r.seq ?? '', r.view ?? '', r.kind ?? ''].join('|');
-  if (!groups.has(key)) groups.set(key, { ...r, values: [], runs: new Set() });
+  const scen = r.speed != null ? `${r.scenario}×${r.speed}` : r.scenario;
+  const key = [scen, r.metric, r.seq ?? '', r.view ?? '', r.kind ?? ''].join('|');
+  if (!groups.has(key)) groups.set(key, { ...r, scenario: scen, values: [], runs: new Set() });
   const g = groups.get(key);
   g.values.push(r.value);
   g.runs.add(r.file);
