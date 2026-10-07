@@ -129,8 +129,10 @@ pub fn run_compare(args: &[String]) -> Result<(), String> {
         sum += s;
         let diff = ia
             .data
-            .chunks_exact(4)
-            .zip(ib.data.chunks_exact(4))
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .zip(ib.data.as_chunks::<4>().0)
             .filter(|(p, q)| p[..3] != q[..3])
             .count() as f64
             / f64::from(ia.width * ia.height);

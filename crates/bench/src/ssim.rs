@@ -70,7 +70,11 @@ pub fn ssim_rgba(a: &[u8], b: &[u8], w: u32, h: u32) -> f64 {
         "image smaller than the SSIM window"
     );
     let channel = |img: &[u8], c: usize| -> Vec<f64> {
-        img.chunks_exact(4).map(|p| f64::from(p[c])).collect()
+        img.as_chunks::<4>()
+            .0
+            .iter()
+            .map(|p| f64::from(p[c]))
+            .collect()
     };
     (0..3)
         .map(|c| ssim_channel(&channel(a, c), &channel(b, c), w, h))

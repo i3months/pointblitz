@@ -22,12 +22,16 @@ pub fn read_png(path: &str) -> Result<Rgba, String> {
     let data = match info.color_type {
         png::ColorType::Rgba => buf[..px * 4].to_vec(),
         png::ColorType::Rgb => buf[..px * 3]
-            .chunks_exact(3)
+            .as_chunks::<3>()
+            .0
+            .iter()
             .flat_map(|c| [c[0], c[1], c[2], 255])
             .collect(),
         png::ColorType::Grayscale => buf[..px].iter().flat_map(|&g| [g, g, g, 255]).collect(),
         png::ColorType::GrayscaleAlpha => buf[..px * 2]
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .flat_map(|c| [c[0], c[0], c[0], c[1]])
             .collect(),
         png::ColorType::Indexed => return Err(format!("{path}: indexed PNG not expanded")),
