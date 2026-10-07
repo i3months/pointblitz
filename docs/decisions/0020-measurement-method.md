@@ -16,7 +16,7 @@ P0.5. SPEC §6.2 지표를 브라우저(기준 방식)에서 뽑는다. 같은 �
 | 항목 | 선택지 | 고른 것 | 이유 |
 |---|---|---|---|
 | 그리기 비용 | rAF 간격 / GPU 타이머 쿼리(`EXT_disjoint_timer_query_webgl2`) / **동기화 프레임** | 동기화 프레임 | 프레임마다 그린 뒤 1 픽셀을 읽어(`readPixels`) GPU 완료를 기다리고 그 시간을 잰다. 타이머 쿼리는 브라우저에서 보안상 꺼져 있는 경우가 많고 구현마다 다르다. 동기화 프레임은 WebGL·WebGPU·native 어디서나 같은 방식(native 는 `device.poll(Wait)`)으로 잴 수 있다 |
-| 반응성 | — / **rAF 간격 유지(`frame_time_*`)** | 유지 | 메인 스레드가 멈추면 rAF 가 밀린다. 사용자가 느끼는 끊김을 보여 준다. 그리기 비용과 이름을 나눠 기록한다 |
+| 반응성 | — / **rAF 간격 유지(`frame_interval_*`)** | 유지 | 메인 스레드가 멈추면 rAF 가 밀린다. 사용자가 느끼는 끊김을 보여 준다. 그리기 비용과 이름을 나눠 기록한다 |
 | vsync | 켬 / **끔(기본)** | 끔 | 켜면 모든 구현이 16.7 ms 로 같아 보인다. 사용자 체감 비교가 필요하면 `--vsync` 로 따로 잰다 |
 | 메인 스레드 블록 | DevTools 트레이스 / **`PerformanceObserver('longtask')`** | longtask | 표준 API, 50 ms 넘는 작업을 시작·길이로 준다. 트레이스는 파일이 크고 해석이 무겁다 |
 | 메모리(`mem_cpu`) | `performance.memory` / CDP `JSHeapUsedSize` / `measureUserAgentSpecificMemory`(COOP/COEP 필요) / **OS 의 렌더러 프로세스 private bytes** | OS private bytes(250 ms 표본, 최대) | JS 힙 지표는 ArrayBuffer·typed array·wasm 메모리를 세지 않는다(PR #6 검토 H1). three.js 의 67 MB 파일 버퍼·90 MB 속성과 PointBlitz wasm 의 거의 전부가 빠져 PointBlitz 에 구조적으로 유리해진다. 프로세스 private bytes 는 모두 포함하고, COOP/COEP 처럼 페이지 조건을 바꾸지 않는다. 렌더러·GPU 프로세스 id 는 CDP `SystemInfo.getProcessInfo`, 표본은 PowerShell 상주 루프 하나(`procmem.mjs`). JS 힙은 `mem_js_heap_max` 로 보조 기록 |
