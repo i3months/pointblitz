@@ -9,7 +9,5 @@ function nn(a,b,s){const g=grid(b,s);const d=[];const step=Math.max(1,Math.floor
   d.push(Math.sqrt(best));}
  d.sort((u,v)=>u-v);const q=t=>d[Math.floor(t*(d.length-1))];return `p10=${q(.1).toFixed(4)} p50=${q(.5).toFixed(4)} p90=${q(.9).toFixed(4)} beyond(0.5m)=${(d.filter(v=>v>0.5).length/d.length*100).toFixed(1)}%`;}
 const files=fs.readdirSync(dir).filter(f=>f.endsWith('.ply')).sort();
-const pairs=[[1,3],[3,5],[5,7],[11,13],[0,1]];
+const pairs=[[1,3],[3,5],[5,7],[11,13],[0,1],[2,3],[4,5]]; // 파일 인덱스(0부터). 마지막 두 쌍 = preview→다음 refined (03→04, 05→06)
 for(const [a,b] of pairs){const A=load(files[a]),B=load(files[b]);console.log(files[a],'->',files[b],'| prev pts NN in next:',nn(A,B,0.5),'| next pts NN in prev:',nn(B,A,0.5));}
-// self spacing reference
-const R=load(files[3]); console.log('self-spacing ref (refined_1 vs itself excl? approx via preview):');
