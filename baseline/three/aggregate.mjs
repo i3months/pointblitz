@@ -2,7 +2,9 @@
 //
 // usage: node aggregate.mjs <dir with *.jsonl> [--md <out.md>]
 // Per-event records (event_latency with seq, frame_time_total_p50_view with view, swap_frame_gpu_wait)
-// are grouped by seq/view as well.
+// are grouped by seq/view as well. Records are also split by implementation (`target`: three.js,
+// native, …), so one session's runs of several implementations can share a directory and appear
+// side by side (P1.5).
 
 import fs from 'node:fs';
 import path from 'node:path';
@@ -20,14 +22,18 @@ const records = fs
       .trim()
       .split('\n')
       .filter(Boolean)
-      .map((l) => ({ ...JSON.parse(l), file: f })),
+      .map((l) => ({ target: 'three.js', ...JSON.parse(l), file: f })),
   );
 
 const groups = new Map();
+// Row order: metrics in the order they first appear, implementations next to each other.
+const firstSeen = new Map();
 for (const r of records) {
   const scen = r.speed != null ? `${r.scenario}×${r.speed}` : r.scenario;
-  const key = [scen, r.metric, r.seq ?? '', r.view ?? '', r.kind ?? ''].join('|');
-  if (!groups.has(key)) groups.set(key, { ...r, scenario: scen, values: [], runs: new Set() });
+  const row = [scen, r.metric, r.seq ?? '', r.view ?? '', r.kind ?? ''].join('|');
+  if (!firstSeen.has(row)) firstSeen.set(row, firstSeen.size);
+  const key = [row, r.target].join('|');
+  if (!groups.has(key)) groups.set(key, { ...r, scenario: scen, order: firstSeen.get(row), values: [], runs: new Set() });
   const g = groups.get(key);
   g.values.push(r.value);
   g.runs.add(r.file);
@@ -36,6 +42,8 @@ for (const r of records) {
 const rows = [...groups.values()].map((g) => {
   const s = [...g.values].sort((a, b) => a - b);
   return {
+    target: g.target,
+    order: g.order,
     scenario: g.scenario,
     metric: g.metric,
     detail: [g.seq != null ? `#${g.seq}` : '', g.kind ?? '', g.view ?? ''].filter(Boolean).join(' '),
@@ -46,18 +54,26 @@ const rows = [...groups.values()].map((g) => {
     max: s[s.length - 1],
   };
 });
-rows.sort((a, b) => a.scenario.localeCompare(b.scenario) || 0);
+rows.sort((a, b) => a.scenario.localeCompare(b.scenario) || a.order - b.order || a.target.localeCompare(b.target));
 
 const fmt = (v) => (v == null ? '' : Number.isInteger(v) ? v.toLocaleString('en-US') : v.toFixed(2));
 const lines = [
-  '| 시나리오 | 지표 | 세부 | 실행 수 | 중앙값 | 최소 | 최대 | 단위 |',
-  '|---|---|---|---:|---:|---:|---:|---|',
-  ...rows.map((r) => `| ${r.scenario} | ${r.metric} | ${r.detail} | ${r.runs} | ${fmt(r.median)} | ${fmt(r.min)} | ${fmt(r.max)} | ${r.unit} |`),
+  '| 시나리오 | 지표 | 세부 | 구현 | 실행 수 | 중앙값 | 최소 | 최대 | 단위 |',
+  '|---|---|---|---|---:|---:|---:|---:|---|',
+  ...rows.map(
+    (r) =>
+      `| ${r.scenario} | ${r.metric} | ${r.detail} | ${r.target} | ${r.runs} | ${fmt(r.median)} | ${fmt(r.min)} | ${fmt(r.max)} | ${r.unit} |`,
+  ),
 ];
-const device = records[0]?.device;
-const header = device
-  ? `장비: ${device.renderer} · ${device.browser} · ${device.cpu} · ${device.os} · ${device.impl} · commit ${records[0].commit}\n\n`
-  : '';
+const devices = new Map();
+for (const r of records) if (r.device && !devices.has(r.target)) devices.set(r.target, r);
+const header =
+  [...devices.entries()]
+    .map(([t, r]) => {
+      const d = r.device;
+      return `- ${t}: ${d.renderer} · ${d.browser} · ${d.cpu} · ${d.os} · ${d.impl} · ${d.refresh_hz} Hz · commit ${r.commit}\n`;
+    })
+    .join('') + (devices.size ? '\n' : '');
 const out = header + lines.join('\n') + '\n';
 if (args.md) fs.writeFileSync(args.md, out);
 process.stdout.write(out);

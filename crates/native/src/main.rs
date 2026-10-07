@@ -1,17 +1,24 @@
 //! PointBlitz native viewer: a window that follows the replay server (P1.4, decision 0026).
 //!
 //! ```text
-//! pointblitz-native --server http://127.0.0.1:8700 [--scenario replay|cold] [--speed 60]
+//! pointblitz-native --server http://127.0.0.1:8700 [--scenario replay|cold|orbit] [--speed 60]
 //!                   [--viewpoints bench/viewpoints/flight-01.json] [--view overview_sw]
 //!                   [--size 1920x1080] [--no-vsync] [--marks out.jsonl] [--exit-on-end]
 //! ```
 //!
 //! Mouse: drag to orbit, wheel to zoom. Keys 1–8: fixed viewpoints. Esc: quit.
+//! Frames are drawn when something changes; `--continuous` draws every frame. `--memory-hints
+//! performance` switches wgpu's allocator back to its default (A/B; P1.5 chose `memory`).
 //!
 //! Marks (`--marks`, one JSON object per line, `t` in ms since start) use the baseline's names
 //! where they mean the same thing (decision 0020): `snapshot_received`, `first_chunk`,
 //! `delivered`, `submitted`, `presented` (GPU finished the first frame that shows the whole
 //! snapshot — synchronised once per snapshot), plus `frames` (all frame start times).
+//!
+//! `orbit` (decision 0020): the last snapshot as in `cold`, then 120 synchronised frames at each
+//! fixed viewpoint into an offscreen target of the window's size and format (like the baseline's
+//! un-presented canvas frames): `sync_frame` lines with `cpu` (encode + submit) and `ms` (until the
+//! GPU is done).
 
 mod net;
 
@@ -39,6 +46,10 @@ struct Args {
     vsync: bool,
     marks: Option<String>,
     exit_on_end: bool,
+    /// wgpu allocator preference: memory (default, P1.5) or speed (wgpu's default, A/B).
+    memory_hints: wgpu::MemoryHints,
+    /// Draw every frame (A/B) instead of only when something changed.
+    continuous: bool,
 }
 
 fn parse_args() -> Result<Args, String> {
@@ -52,6 +63,8 @@ fn parse_args() -> Result<Args, String> {
         vsync: true,
         marks: None,
         exit_on_end: false,
+        memory_hints: wgpu::MemoryHints::MemoryUsage,
+        continuous: false,
     };
     let mut it = std::env::args().skip(1);
     while let Some(k) = it.next() {
@@ -73,11 +86,19 @@ fn parse_args() -> Result<Args, String> {
             "--no-vsync" => a.vsync = false,
             "--marks" => a.marks = Some(val()?),
             "--exit-on-end" => a.exit_on_end = true,
+            "--continuous" => a.continuous = true,
+            "--memory-hints" => {
+                a.memory_hints = match val()?.as_str() {
+                    "performance" => wgpu::MemoryHints::Performance,
+                    "memory" => wgpu::MemoryHints::MemoryUsage,
+                    _ => return Err("--memory-hints performance|memory".into()),
+                }
+            }
             other => return Err(format!("unknown argument {other}")),
         }
     }
-    if !matches!(a.scenario.as_str(), "replay" | "cold") {
-        return Err("--scenario replay|cold".into());
+    if !matches!(a.scenario.as_str(), "replay" | "cold" | "orbit") {
+        return Err("--scenario replay|cold|orbit".into());
     }
     Ok(a)
 }
@@ -160,8 +181,15 @@ fn depth_view(device: &wgpu::Device, w: u32, h: u32) -> wgpu::TextureView {
 }
 
 impl Gpu {
-    fn new(window: Arc<Window>, vsync: bool) -> Result<Self, String> {
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+    fn new(
+        window: Arc<Window>,
+        vsync: bool,
+        memory_hints: wgpu::MemoryHints,
+    ) -> Result<Self, String> {
+        let instance = wgpu::Instance::new(
+            // WGPU_BACKEND=vulkan|dx12|gl selects the backend (A/B, P1.5).
+            wgpu::InstanceDescriptor::new_without_display_handle_from_env(),
+        );
         let surface = instance
             .create_surface(window.clone())
             .map_err(|e| e.to_string())?;
@@ -176,8 +204,11 @@ impl Gpu {
             "adapter: {} ({:?}, driver {})",
             info.name, info.backend, info.driver_info
         );
-        let (device, queue) = block_on(adapter.request_device(&wgpu::DeviceDescriptor::default()))
-            .map_err(|e| e.to_string())?;
+        let (device, queue) = block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+            memory_hints,
+            ..Default::default()
+        }))
+        .map_err(|e| e.to_string())?;
         let size = window.inner_size();
         let mut config = surface
             .get_default_config(&adapter, size.width.max(1), size.height.max(1))
@@ -194,6 +225,10 @@ impl Gpu {
             wgpu::PresentMode::AutoNoVsync
         };
         surface.configure(&device, &config);
+        eprintln!(
+            "surface: {}x{} {:?} {:?}",
+            config.width, config.height, config.format, config.present_mode
+        );
         let depth = depth_view(&device, config.width, config.height);
         let renderer = Renderer::new(&device, config.format);
         Ok(Self {
@@ -262,8 +297,12 @@ struct App {
     to_present: Vec<u32>,
     snaps: BTreeMap<u32, SnapTimes>,
     first_chunk_seen: Vec<u32>,
+    /// Time spent in Scene::insert (validation + GPU buffer creation) per snapshot.
+    upload_ms: BTreeMap<u32, f64>,
     ended: bool,
     errors: usize,
+    /// Frames drawn after everything was presented (orbit waits for a few before syncing).
+    settled_frames: u32,
 }
 
 impl App {
@@ -280,14 +319,22 @@ impl App {
                 s.kind = snap.kind;
                 s.received = Some(at);
             }
-            Msg::Chunk { seq, bytes, last } => {
+            Msg::Chunk {
+                seq,
+                bytes,
+                last,
+                at,
+            } => {
                 if !self.first_chunk_seen.contains(&seq) {
                     self.first_chunk_seen.push(seq);
                     self.marks
                         .add("first_chunk", now, &format!(",\"seq\":{seq}"));
                 }
                 let Some(gpu) = &self.gpu else { return };
-                match self.scene.insert(&gpu.device, &bytes) {
+                let t_insert = Instant::now();
+                let inserted = self.scene.insert(&gpu.device, &bytes);
+                *self.upload_ms.entry(seq).or_default() += t_insert.elapsed().as_secs_f64() * 1e3;
+                match inserted {
                     Ok(Inserted::Swapped { from, to }) => {
                         let from = from.map_or("null".into(), |g| g.to_string());
                         self.marks.add(
@@ -304,13 +351,16 @@ impl App {
                     }
                 }
                 if last {
+                    self.marks
+                        .add("last_chunk_received", at, &format!(",\"seq\":{seq}"));
                     self.marks.add(
                         "uploaded",
                         Instant::now(),
                         &format!(
-                            ",\"seq\":{seq},\"points\":{},\"gpu_bytes\":{}",
+                            ",\"seq\":{seq},\"points\":{},\"gpu_bytes\":{},\"upload_ms\":{:.3}",
                             self.scene.points(),
-                            self.scene.gpu_bytes()
+                            self.scene.gpu_bytes(),
+                            self.upload_ms.get(&seq).copied().unwrap_or(0.0)
                         ),
                     );
                     self.to_present.push(seq);
@@ -322,7 +372,12 @@ impl App {
                 generation,
                 bytes,
                 fetch_start,
+                headers_at,
             } => {
+                self.marks
+                    .add("fetch_start", fetch_start, &format!(",\"seq\":{seq}"));
+                self.marks
+                    .add("headers", headers_at, &format!(",\"seq\":{seq}"));
                 let fetch_ms = now.duration_since(fetch_start).as_secs_f64() * 1e3;
                 self.marks.add(
                     "delivered",
@@ -445,6 +500,65 @@ impl App {
         event_loop.exit();
     }
 
+    /// Synchronised frames at every fixed viewpoint (SPEC §6.2 frame_time, decision 0020).
+    fn sync_orbit(&mut self) {
+        const FRAMES_PER_VIEW: usize = 120;
+        let Some(gpu) = &mut self.gpu else { return };
+        let size = [gpu.config.width, gpu.config.height];
+        let color = gpu
+            .device
+            .create_texture(&wgpu::TextureDescriptor {
+                label: Some("sync target"),
+                size: wgpu::Extent3d {
+                    width: size[0],
+                    height: size[1],
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: gpu.config.format,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+                view_formats: &[],
+            })
+            .create_view(&wgpu::TextureViewDescriptor::default());
+        self.marks.add("sync_start", Instant::now(), "");
+        for (name, cam) in &self.views {
+            for _ in 0..FRAMES_PER_VIEW {
+                let t0 = Instant::now();
+                let mut enc = gpu
+                    .device
+                    .create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
+                gpu.renderer.render(
+                    &gpu.device,
+                    &gpu.queue,
+                    &mut enc,
+                    &color,
+                    &gpu.depth,
+                    size,
+                    cam,
+                    &self.scene,
+                );
+                let index = gpu.queue.submit([enc.finish()]);
+                let t1 = Instant::now();
+                let _ = gpu.device.poll(wgpu::PollType::Wait {
+                    submission_index: Some(index),
+                    timeout: None,
+                });
+                let t2 = Instant::now();
+                let ms = |a: Instant, b: Instant| b.duration_since(a).as_secs_f64() * 1e3;
+                writeln!(
+                    self.marks.lines,
+                    "{{\"name\":\"sync_frame\",\"view\":\"{name}\",\"cpu\":{:.4},\"ms\":{:.4}}}",
+                    ms(t0, t1),
+                    ms(t0, t2)
+                )
+                .unwrap();
+            }
+        }
+        self.marks.add("sync_end", Instant::now(), "");
+    }
+
     fn orbit(&mut self, dx: f64, dy: f64) {
         let c = &mut self.camera;
         let up = c.up.normalize();
@@ -483,13 +597,27 @@ impl ApplicationHandler<Msg> for App {
                 return;
             }
         };
-        match Gpu::new(window, self.args.vsync) {
+        match Gpu::new(window, self.args.vsync, self.args.memory_hints.clone()) {
             Ok(g) => self.gpu = Some(g),
             Err(e) => {
                 eprintln!("gpu: {e}");
                 event_loop.exit();
                 return;
             }
+        }
+        // Refresh rate paces vsync and therefore presentation (record it with the results).
+        if let Some(hz) = self
+            .gpu
+            .as_ref()
+            .and_then(|g| g.window.current_monitor())
+            .and_then(|m| m.refresh_rate_millihertz())
+        {
+            eprintln!("display: {:.1} Hz", f64::from(hz) / 1000.0);
+            self.marks.add(
+                "display",
+                Instant::now(),
+                &format!(",\"refresh_hz\":{:.1}", f64::from(hz) / 1000.0),
+            );
         }
         // Start the network only once the device exists, so no chunk waits for it.
         let proxy = self.proxy.take().expect("proxy set in main");
@@ -509,7 +637,7 @@ impl ApplicationHandler<Msg> for App {
             Instant::now(),
             &format!(",\"scenario\":\"{}\"", self.args.scenario),
         );
-        if self.args.scenario == "cold" {
+        if self.args.scenario != "replay" {
             net::spawn_cold(host, send);
         } else {
             net::spawn_replay(host, self.args.speed, send);
@@ -521,6 +649,16 @@ impl ApplicationHandler<Msg> for App {
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _: WindowId, event: WindowEvent) {
+        let changes_view = matches!(
+            event,
+            WindowEvent::Resized(_)
+                | WindowEvent::CursorMoved { .. }
+                | WindowEvent::MouseWheel { .. }
+                | WindowEvent::KeyboardInput { .. }
+        );
+        if changes_view && let Some(g) = &self.gpu {
+            g.window.request_redraw();
+        }
         match event {
             WindowEvent::CloseRequested => self.finish(event_loop),
             WindowEvent::Resized(s) => {
@@ -530,7 +668,18 @@ impl ApplicationHandler<Msg> for App {
             }
             WindowEvent::RedrawRequested => {
                 self.redraw();
-                if self.ended && self.to_present.is_empty() && self.args.exit_on_end {
+                let settled = self.ended && self.to_present.is_empty();
+                if settled && self.args.scenario == "orbit" {
+                    // Let the swapped snapshot reach the screen first (PR #6 review), then sync.
+                    self.settled_frames += 1;
+                    if let Some(g) = &self.gpu {
+                        g.window.request_redraw();
+                    }
+                    if self.settled_frames >= 3 {
+                        self.sync_orbit();
+                        self.finish(event_loop);
+                    }
+                } else if settled && self.args.exit_on_end {
                     self.finish(event_loop);
                 }
             }
@@ -579,8 +728,12 @@ impl ApplicationHandler<Msg> for App {
     }
 
     fn about_to_wait(&mut self, _: &ActiveEventLoop) {
-        // Continuous frames like the baseline's requestAnimationFrame loop; vsync paces them.
-        if let Some(g) = &self.gpu {
+        // Frames are drawn when something changed (new chunks, camera, size — P1.5). A continuous
+        // loop blocks this thread in the swapchain acquire for up to a vsync interval, and chunks
+        // that arrive meanwhile wait in the queue. --continuous keeps the old loop for A/B.
+        if self.args.continuous
+            && let Some(g) = &self.gpu
+        {
             g.window.request_redraw();
         }
     }
@@ -633,8 +786,10 @@ fn main() -> std::process::ExitCode {
         to_present: Vec::new(),
         snaps: BTreeMap::new(),
         first_chunk_seen: Vec::new(),
+        upload_ms: BTreeMap::new(),
         ended: false,
         errors: 0,
+        settled_frames: 0,
     };
     if let Err(e) = event_loop.run_app(&mut app) {
         eprintln!("event loop: {e}");

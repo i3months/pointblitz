@@ -342,13 +342,28 @@ fn serve_chunks(
     have: Option<(u32, usize)>,
 ) -> std::io::Result<()> {
     use crate::chunks::{MAX_POINTS, Plan, plan};
+    use pointblitz_io::chunk::{
+        FLAG_LAST_IN_GENERATION, chunk_count, chunk_records, encode_records,
+    };
+    use std::io::{Seek, SeekFrom};
+    let invalid =
+        |e: pointblitz_io::PlyError| std::io::Error::new(std::io::ErrorKind::InvalidData, e);
     let t0 = Instant::now();
-    let ply = std::fs::read(server.data.join(&server.events[idx].file))?;
     let p = plan(&server.events, idx, have, |k| server.appends[k]);
     let (generation, skip, kind) = match p {
         Plan::Full { generation } => (generation, 0, "full"),
         Plan::Delta { generation, skip } => (generation, skip, "delta"),
     };
+    // Read the header, then only the records this delivery sends (P1.5: a delta used to read the
+    // whole file).
+    let mut file = std::fs::File::open(server.data.join(&server.events[idx].file))?;
+    let mut head = Vec::new();
+    (&mut file).take(64 * 1024).read_to_end(&mut head)?;
+    let h = pointblitz_io::parse_header(&head).map_err(invalid)?;
+    let skip = skip.min(h.vertex_count);
+    let mut records = vec![0u8; (h.vertex_count - skip) * h.stride];
+    file.seek(SeekFrom::Start((h.header_len + skip * h.stride) as u64))?;
+    file.read_exact(&mut records)?;
     let read_ms = t0.elapsed().as_secs_f64() * 1e3;
     write!(
         stream,
@@ -356,24 +371,39 @@ fn serve_chunks(
          X-PB-Delivery: {kind}\r\nX-PB-Generation: {generation}\r\n\
          Cache-Control: no-store\r\nConnection: close\r\n\r\n"
     )?;
+    // Chunks are encoded in parallel (up to one thread per core) and written in order as soon as
+    // the next one is ready, so the first chunk still leaves early (P1.5).
+    let chunks = chunk_count(h.vertex_count - skip, MAX_POINTS);
+    let workers = std::thread::available_parallelism().map_or(4, |n| n.get());
     let mut sent = 0u64;
-    let mut write_err = None;
-    let res = pointblitz_io::chunk::ply_tail_to_chunks(&ply, generation, skip, MAX_POINTS, |c| {
-        match stream.write_all(&c) {
-            Ok(()) => {
-                sent += c.len() as u64;
-                true
+    std::thread::scope(|s| -> std::io::Result<()> {
+        let encode = |i: usize| {
+            let flags = if i + 1 == chunks {
+                FLAG_LAST_IN_GENERATION
+            } else {
+                0
+            };
+            let part = chunk_records(&h, &records, MAX_POINTS, i);
+            encode_records(&h, part, generation, i as u32, flags)
+        };
+        let mut running = std::collections::VecDeque::new();
+        let mut next = 0;
+        for _ in 0..chunks {
+            while running.len() < workers && next < chunks {
+                let i = next;
+                running.push_back(s.spawn(move || encode(i)));
+                next += 1;
             }
-            Err(e) => {
-                write_err = Some(e);
-                false
-            }
+            let c = running
+                .pop_front()
+                .expect("one encoder per chunk")
+                .join()
+                .map_err(|_| std::io::Error::other("encoder panicked"))?;
+            stream.write_all(&c)?;
+            sent += c.len() as u64;
         }
-    });
-    if let Some(e) = write_err {
-        return Err(e);
-    }
-    let chunks = res.map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+        Ok(())
+    })?;
     stream.flush()?;
     eprintln!(
         "chunks: seq {} {kind} gen {generation} skip {skip} -> {chunks} chunks, {sent} B, \
