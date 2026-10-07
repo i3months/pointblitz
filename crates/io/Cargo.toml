@@ -13,3 +13,6 @@ publish.workspace = true
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+skyrecon-core = { git = "https://github.com/AH100-1/skyrecon", rev = "9f8a0f5ea4e740aab22062e5d40b1f131a824dae" }

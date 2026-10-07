@@ -61,21 +61,42 @@ fn flight01_counts_stream_and_chunks() {
         let chunks = chunk::ply_to_chunks(&bytes, 0, 256 * 1024).unwrap();
         let t_chunk = t.elapsed();
         let mut total = 0usize;
+        let mut max_err = 0.0f64;
         for (i, c) in chunks.iter().enumerate() {
             let ch = chunk::decode_header(c).unwrap();
             assert_eq!(c.len(), chunk::HEADER_LEN + 16 * ch.point_count as usize);
             assert_eq!(ch.flags == FLAG_LAST_IN_GENERATION, i + 1 == chunks.len());
+            // Round trip (PR #8 review): colour exact, inside the chunk bbox, position ≤ 1e-5 m.
+            for (k, rec) in chunk::vertex_bytes(c)
+                .as_chunks::<16>()
+                .0
+                .iter()
+                .enumerate()
+            {
+                let orig = &whole[total + k];
+                let f = |o: usize| f32::from_le_bytes(rec[o..o + 4].try_into().unwrap());
+                let rel = [f(0), f(4), f(8)];
+                for (a, r) in rel.iter().enumerate() {
+                    assert!(*r >= ch.bbox_min[a] && *r <= ch.bbox_max[a], "{name}: bbox");
+                    let back = f64::from(*r) + ch.origin[a];
+                    max_err = max_err.max((back - f64::from(orig.position[a])).abs());
+                }
+                assert_eq!(&rec[12..15], &orig.color, "{name}: colour");
+                assert_eq!(rec[15], 255);
+            }
             total += ch.point_count as usize;
         }
         assert_eq!(total, expected);
+        assert!(max_err <= 1e-5, "{name}: position error {max_err} m");
         let chunk_bytes: usize = chunks.iter().map(Vec::len).sum();
         println!(
-            "{name}: {expected} pts, PLY {} B → chunks {chunk_bytes} B ({} chunks); parse {:.1} ms, stream {:.1} ms, to-chunks {:.1} ms",
+            "{name}: {expected} pts, PLY {} B → chunks {chunk_bytes} B ({} chunks); parse {:.1} ms, stream {:.1} ms, to-chunks {:.1} ms, max round-trip error {:.2e} m",
             bytes.len(),
             chunks.len(),
             t_parse.as_secs_f64() * 1e3,
             t_stream.as_secs_f64() * 1e3,
             t_chunk.as_secs_f64() * 1e3,
+            max_err,
         );
     }
 }
