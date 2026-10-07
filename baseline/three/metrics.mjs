@@ -20,6 +20,7 @@ export function summarize(raw, { device, commit, target = 'three.js' }) {
     target,
     device,
     scenario,
+    speed: scenario === 'replay' ? raw.speed : undefined,
     commit,
     samples,
     ...extra,

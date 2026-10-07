@@ -13,10 +13,11 @@ export function parseArgs(argv = process.argv.slice(2)) {
 
 export const CHROME = 'C:/Program Files/Google/Chrome/Application/chrome.exe';
 
-// Real GPU in headless Chrome (ANGLE D3D11) and uncapped frames unless --vsync (decision 0020).
+// Real GPU in headless Chrome (ANGLE D3D11). vsync stays ON by default: an uncapped rAF loop floods
+// the GPU queue and inflates event latency and long tasks (P0.6, decision 0020). --no-vsync uncaps.
 export function chromeArgs(args) {
   return [
     '--use-angle=d3d11', '--enable-gpu', '--ignore-gpu-blocklist', '--window-size=1920,1080',
-    ...(args.vsync ? [] : ['--disable-gpu-vsync', '--disable-frame-rate-limit']),
+    ...(args['no-vsync'] ? ['--disable-gpu-vsync', '--disable-frame-rate-limit'] : []),
   ];
 }
