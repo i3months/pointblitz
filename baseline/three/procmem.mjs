@@ -7,7 +7,7 @@
 // One long-lived PowerShell process prints "pid private workingset" lines every interval, so the
 // sampling cost does not depend on spawning a process per sample.
 
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 
 /** Finds renderer and GPU process ids via the browser-level CDP domain SystemInfo. */
 export async function chromeProcessIds(browser) {
@@ -41,4 +41,23 @@ export function sampleProcesses(pids, intervalMs = 250) {
     ps.kill();
     return samples;
   };
+}
+
+/**
+ * Peak commit (private) bytes the OS recorded for each process over its whole life — Win32_Process
+ * PeakPageFileUsage (KB), i.e. PROCESS_MEMORY_COUNTERS.PeakPagefileUsage (decision 0032). Read it
+ * while the processes are still alive. Unlike the 250 ms samples, it cannot miss a short peak.
+ * Returns {pid: bytes}; pids that are gone are missing.
+ */
+export function peakCommit(pids) {
+  if (!pids.length) return {};
+  const filter = pids.map((p) => `ProcessId=${Number(p)}`).join(' OR ');
+  const script = `Get-CimInstance Win32_Process -Filter "${filter}" | ForEach-Object { "$($_.ProcessId) $($_.PeakPageFileUsage)" }`;
+  const out = spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], { encoding: 'utf8' }).stdout ?? '';
+  const peaks = {};
+  for (const line of out.split(/\r?\n/)) {
+    const [pid, kb] = line.trim().split(/\s+/).map(Number);
+    if (pid && Number.isFinite(kb)) peaks[pid] = kb * 1024;
+  }
+  return peaks;
 }

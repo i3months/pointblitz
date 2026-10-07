@@ -116,18 +116,29 @@ export function summarize(raw, { device, commit, target = 'three.js' }) {
   // wasm memory, which JSHeapUsedSize does not count — PR #6 review H1). JS heap stays as a
   // secondary metric. The GPU process figure is reported separately.
   const proc = raw.proc ?? { renderer: [], gpu: [] };
+  // mem_cpu = peak commit (private bytes) the OS recorded for the process over the run (decision
+  // 0032, replacing the max of 250 ms samples, which misses short peaks — PR #17 review H). The
+  // samples stay as mem_cpu_sampled_max for timelines and as a cross-check.
+  if (raw.peak?.renderer) {
+    out.push(rec('mem_cpu', raw.peak.renderer, 'B', 1, { method: raw.peak.method ?? 'OS peak commit of the renderer process (PeakPagefileUsage)' }));
+  }
+  if (raw.peak?.gpu) out.push(rec('mem_gpu_process_peak', raw.peak.gpu, 'B', 1, { method: 'OS peak commit of the GPU process' }));
   if (proc.renderer.length) {
-    out.push(rec('mem_cpu', Math.max(...proc.renderer.map((s) => s.private)), 'B', proc.renderer.length, { method: 'renderer process private bytes (max of 250 ms samples)' }));
-    if (scenario === 'memtest') {
-      // Self-check: private bytes just before vs after holding the 200 MB Float32Array.
+    out.push(rec('mem_cpu_sampled_max', Math.max(...proc.renderer.map((s) => s.private)), 'B', proc.renderer.length, { method: 'max of 250 ms private-bytes samples' }));
+    if (scenario === 'memtest' || scenario === 'memspike') {
+      // Self-checks (decisions 0020, 0032). memtest holds 200 MB: both the OS peak and the samples
+      // must rise by about that much. memspike frees it ~30 ms later: the OS peak must still rise,
+      // the 250 ms samples usually miss it.
       const a = by('alloc_start')[0], e = by('alloc_end')[0];
       const at = (m) => raw.timeOrigin + m.t;
       const before = proc.renderer.filter((x) => x.ts < at(a)).map((x) => x.private);
-      const after = proc.renderer.filter((x) => x.ts > at(e) + 250).map((x) => x.private);
+      const from = scenario === 'memtest' ? at(e) + 250 : at(a);
+      const after = proc.renderer.filter((x) => x.ts > from).map((x) => x.private);
       if (before.length && after.length) {
-        out.push(rec('memtest_cpu_delta', Math.max(...after) - before[before.length - 1], 'B', after.length, { allocated: e.bytes }));
+        if (raw.peak?.renderer) out.push(rec(`${scenario}_peak_delta`, raw.peak.renderer - before[before.length - 1], 'B', 1, { allocated: e.bytes }));
+        out.push(rec(`${scenario}_sampled_delta`, Math.max(...after) - before[before.length - 1], 'B', after.length, { allocated: e.bytes }));
         const hb = heap.length ? heap : [0];
-        out.push(rec('memtest_js_heap_max', Math.max(...hb), 'B', hb.length));
+        out.push(rec(`${scenario}_js_heap_max`, Math.max(...hb), 'B', hb.length));
       }
     }
     out.push(rec('mem_renderer_working_set_max', Math.max(...proc.renderer.map((s) => s.working)), 'B', proc.renderer.length));

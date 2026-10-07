@@ -35,5 +35,6 @@
 | [0029](0029-web-viewer.md) | 브라우저 뷰어 구조(Rust Viewer + JS 루프, gpu_done) | 승인 |
 | [0030](0030-web-replay-client.md) | 브라우저 재생 클라이언트, 측정기 공용화, 탐색 전 메모리 표본 | 승인 |
 | [0031](0031-webgl2-fallback.md) | WebGPU 없을 때 WebGL2 대체 | 승인 |
+| [0032](0032-mem-cpu-os-peak.md) | mem_cpu = OS 최대 commit(0020 메모리 행 대체) | 승인 |
 
 "제안" 상태는 작업자가 제안한 것이다. 감독 검토 또는 소유자 확인 뒤 "승인" 이 된다.

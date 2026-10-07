@@ -15,7 +15,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { parseArgs } from '../../baseline/three/args.mjs';
 import { percentile, summarize } from '../../baseline/three/metrics.mjs';
-import { sampleProcesses } from '../../baseline/three/procmem.mjs';
+import { peakCommit, sampleProcesses } from '../../baseline/three/procmem.mjs';
 
 const args = parseArgs();
 const server = args.server ?? 'http://127.0.0.1:8700';
@@ -24,17 +24,25 @@ const speed = Number(args.speed ?? 60);
 const exe = args.exe ?? 'target/release/pointblitz-native.exe';
 const marksPath = path.join(os.tmpdir(), `pb-native-marks-${process.pid}-${Date.now()}.jsonl`);
 
-const cli = ['--server', server, '--scenario', scenario, '--speed', String(speed), '--marks', marksPath, '--exit-on-end'];
+const cli = ['--server', server, '--scenario', scenario, '--speed', String(speed), '--marks', marksPath, '--exit-on-end', '--wait-before-exit'];
 if (args['no-vsync']) cli.push('--no-vsync');
 if (args.continuous) cli.push('--continuous');
 if (args['memory-hints']) cli.push('--memory-hints', args['memory-hints']);
 
 const t0 = Date.now();
 const spawnAt = Date.now();
-const child = spawn(exe, cli, { stdio: ['ignore', 'ignore', 'pipe'] });
+const child = spawn(exe, cli, { stdio: ['pipe', 'ignore', 'pipe'] });
 const stopProc = sampleProcesses([child.pid]);
 let stderr = '';
-child.stderr.on('data', (d) => (stderr += d));
+// The viewer prints `finished` and waits: read its OS peak commit while it exists (decision 0032).
+let peak = 0;
+child.stderr.on('data', (d) => {
+  stderr += d;
+  if (!peak && /^finished\r?$/m.test(stderr)) {
+    peak = peakCommit([child.pid])[child.pid] ?? 0;
+    child.stdin.end('\n');
+  }
+});
 const code = await new Promise((resolve) => child.on('exit', resolve));
 const samples = stopProc();
 if (code !== 0) {
@@ -65,6 +73,7 @@ const raw = {
   longtasks: [],
   syncFrames: by('sync_frame').map((f) => ({ view: f.view, cpu: f.cpu, ms: f.ms })),
   proc: { renderer: samples[child.pid] ?? [], gpu: [] },
+  peak: { renderer: peak, method: 'OS peak commit of the native process (PeakPagefileUsage)' },
   native: { uploaded: by('uploaded'), delivered: by('delivered'), display: by('display')[0] },
   lines,
   wall_ms: Date.now() - t0,

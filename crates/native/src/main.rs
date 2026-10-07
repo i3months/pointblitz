@@ -46,6 +46,9 @@ struct Args {
     vsync: bool,
     marks: Option<String>,
     exit_on_end: bool,
+    /// After the run, print `finished` on stderr and wait for a line on stdin before exiting, so a
+    /// harness can read the process's OS peak memory while it still exists (decision 0032).
+    wait_before_exit: bool,
     /// wgpu allocator preference: memory (default, P1.5) or speed (wgpu's default, A/B).
     memory_hints: wgpu::MemoryHints,
     /// Draw every frame (A/B) instead of only when something changed.
@@ -63,6 +66,7 @@ fn parse_args() -> Result<Args, String> {
         vsync: true,
         marks: None,
         exit_on_end: false,
+        wait_before_exit: false,
         memory_hints: wgpu::MemoryHints::MemoryUsage,
         continuous: false,
     };
@@ -86,6 +90,7 @@ fn parse_args() -> Result<Args, String> {
             "--no-vsync" => a.vsync = false,
             "--marks" => a.marks = Some(val()?),
             "--exit-on-end" => a.exit_on_end = true,
+            "--wait-before-exit" => a.wait_before_exit = true,
             "--continuous" => a.continuous = true,
             "--memory-hints" => {
                 a.memory_hints = match val()?.as_str() {
@@ -791,7 +796,13 @@ fn main() -> std::process::ExitCode {
         errors: 0,
         settled_frames: 0,
     };
-    if let Err(e) = event_loop.run_app(&mut app) {
+    let result = event_loop.run_app(&mut app);
+    if app.args.wait_before_exit {
+        eprintln!("finished");
+        let mut line = String::new();
+        let _ = std::io::stdin().read_line(&mut line);
+    }
+    if let Err(e) = result {
         eprintln!("event loop: {e}");
         return std::process::ExitCode::FAILURE;
     }

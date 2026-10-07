@@ -286,6 +286,8 @@ fn handle(server: &Server, mut stream: TcpStream) -> std::io::Result<()> {
                 None => respond(&mut stream, 404, "text/plain", b"not found"),
             }
         }
+        // Browsers ask for it on every page (the JSON page opened before measuring, too).
+        "/favicon.ico" => respond(&mut stream, 204, "text/plain", b""),
         p if p.starts_with("/static/") => {
             match server
                 .web
@@ -436,6 +438,7 @@ fn serve_file(stream: &mut TcpStream, path: &Path) -> std::io::Result<()> {
 fn respond(stream: &mut TcpStream, code: u16, ty: &str, body: &[u8]) -> std::io::Result<()> {
     let reason = match code {
         200 => "OK",
+        204 => "No Content",
         404 => "Not Found",
         _ => "Method Not Allowed",
     };
