@@ -32,3 +32,23 @@ node baseline/three/capture.mjs --server http://127.0.0.1:<port> --out target/be
 target/release/pointblitz-bench compare target/bench/baseline-three target/bench/pointblitz-native \
   --viewpoints bench/viewpoints/flight-01.json
 ```
+
+## browser (P2.2)
+
+같은 시점 8곳을 브라우저(Chrome 155 헤드리스, WebGPU, `bench/web/capture.mjs` — 캔버스 스크린샷)에서 캡처했다.
+
+| 비교 | SSIM 평균 | 픽셀이 다른 비율 |
+|---|---:|---:|
+| browser(WebGPU) 대 native(Vulkan) | **1.0000** | 8곳 모두 0.00 % |
+| browser(WebGPU) 대 three.js | 0.9919 | native 와 같은 값(4.65~18.34 %) |
+
+같은 `pointblitz-core` 가 브라우저 WebGPU(Bgra8Unorm 캔버스)와 native Vulkan(Rgba8Unorm 캡처)에서 픽셀 단위로 같은 화면을 낸다.
+three.js 와의 차이는 구현(겹친 점의 앞뒤·래스터화)에서 오며, 실행 대상과는 상관없다.
+
+재현:
+```sh
+bash web/build.sh
+pointblitz-bench replay --data <ply dir> --web . --port 8700
+node bench/web/capture.mjs --server http://127.0.0.1:8700 --out target/bench/pointblitz-web
+pointblitz-bench compare target/bench/pointblitz-native target/bench/pointblitz-web --viewpoints bench/viewpoints/flight-01.json
+```

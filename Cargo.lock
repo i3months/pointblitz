@@ -1528,6 +1528,7 @@ dependencies = [
 name = "pointblitz-web"
 version = "0.0.0"
 dependencies = [
+ "js-sys",
  "pointblitz-core",
  "wasm-bindgen",
  "wasm-bindgen-futures",
