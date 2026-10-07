@@ -4,7 +4,7 @@
 - 대상: 기준 방식(결정 0005·0019) — three.js 0.185.1 `PLYLoader` + `Points`, 이벤트마다 전체 다운로드·메인 스레드 해석·전체 교체
 - 데이터: `flight-01`(14 스냅샷, 마지막 2,502,015 점 · 67,554,652 B)
 - 측정 방법: 결정 0020(동기화 프레임, OS 프로세스 메모리, longtask), 결정 0021(vsync 켬)
-- 장비: RTX 4070 12 GB(드라이버 591.86) · ANGLE D3D11 · Chrome 155.0.8059.40 · Intel i7-13700F · Windows 11(10.0.26200) · 헤드리스 60 Hz
+- 장비: RTX 4070 12 GB(드라이버 591.86) · ANGLE D3D11 · Chrome 155.0.8059.40 · Intel i7-13700F · Windows 11(10.0.26200) · 헤드리스 60 Hz · 전원 구성표 균형 조정(`381b4222-f694-41f0-9685-ff5bb260df2e`, 측정 뒤 확인 — 이후 측정은 `device.power_plan` 에 기록)
 - 측정 커밋: `78ed45c` · 서버는 루프백(네트워크 시간 없음 — 결정 0011 로 따로 더한다)
 
 ## 요약 — 비교표 three.js 열 (중앙값)
@@ -12,8 +12,9 @@
 | 지표 | 값 | 시나리오 · 실행 수 | 비고 |
 |---|---:|---|---|
 | bytes_total | 530,796,804 B | replay ×60 · 3 | 스냅샷 14개 전체를 매번 받는다 |
-| event_latency (preview, p50) | 466.5 ms | replay ×60 · 3 | 최대 875 ms |
-| event_latency (refined, p50) | 609.1 ms | replay ×60 · 3 | 최대 920 ms |
+| event_latency (preview, p50) — ×60 | 466.5 ms | replay ×60 · 3 | 최대 875 ms |
+| event_latency (refined, p50) — ×60 | 609.1 ms | replay ×60 · 3 | 최대 920 ms |
+| event_latency (preview / refined, p50) — ×1 | 873.9 / 881.2 ms | replay ×1 · **1** | ×60 의 1.9 / 1.4 배, 원인 미확인(아래) |
 | first_frame (cold) | 990.1 ms | cold · 5 | 마지막 스냅샷 하나 |
 | frame_time_total p50 / p95 / p99 (2.5 M) | 2.8 / 3.8 / 6.0 ms | orbit · 5 | 동기화 프레임, 시점 8곳 |
 | frame_time_cpu p50 | < 0.1 ms | orbit · 5 | `performance.now()` 해상도 0.1 ms |
@@ -38,8 +39,18 @@
 - 그리기는 이 GPU 에서 250만 점에 2.8 ms 로 이미 빠르다.
 - 교체 프레임 GPU 대기는 점 수에 비례해 커진다(replay ×60: 이벤트 1 의 1.9 ms → 이벤트 14 의 29.1 ms).
 - 메모리는 원본 파일 버퍼(67.5 MB) + 해석 중간 배열 + float32 속성(90 MB)이 겹쳐 렌더러 private 이 600 MB 대다. replay 에서는 이전 스냅샷이 해제되기 전에 다음을 받으므로 861 MB 까지 오른다.
-- replay ×1(실시간 33 분, 1 회): 이벤트 반영 p50 은 ×60 과 비슷하지만(preview 874 ms, refined 881 ms) 최대가 1.6 s 로 길다.
-  해석 합이 9,080 ms 로 ×60(6,111 ms)보다 크다 — 이벤트 사이 긴 유휴 뒤 CPU 클럭이 내려간 상태에서 해석이 시작되는 것으로 보인다(확인 안 됨, 1 회 측정).
+- **replay ×1(실시간 33 분, 1 회)은 ×60 보다 느리다.** p50 preview 873.9 ms(×60 의 1.9 배), refined 881.2 ms(1.4 배), 최대 1.66 s. 해석 합 9,080 ms(×60 6,111 ms).
+  이벤트별(×1 / ×60 중앙값):
+
+  | # | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 12 | 13 | 14 |
+  |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+  | ×1 (ms) | 74 | 167 | 319 | 608 | 668 | 929 | 970 | 1277 | 1303 | 1611 | 1659 | 839 | 874 | 881 |
+  | ×60 (ms) | 75 | 142 | 161 | 295 | 308 | 452 | 467 | 609 | 621 | 751 | 755 | 885 | 875 | 920 |
+  | 배 | 0.98 | 1.17 | 1.98 | 2.06 | 2.17 | 2.05 | 2.08 | 2.10 | 2.10 | 2.14 | 2.20 | 0.95 | 1.00 | 0.96 |
+
+  #3~#11 은 약 2 배, #1·#2·#12~#14 는 같다. 원인은 **확인 안 됨**. 이벤트 사이 긴 유휴(수 분) 뒤 CPU 클럭이 내려간 상태에서 해석이 시작된다는 가설이 있으나,
+  감독이 잰 ×10(이벤트 간격 3~30 s)에서는 나타나지 않았고(preview / refined p50 503.8 / 606.7 ms), ×1 에서도 #12~#14 는 정상이라 가설과 다 맞지는 않는다.
+  P1.5 전에 ×1 을 한 번 더 재며 전원 구성표·CPU 클럭을 함께 기록한다(PR #7 검토 중간).
 
 ## PointBlitz 가 이겨야 할 곳
 
@@ -56,22 +67,17 @@
 - **GPU 프로세스 private bytes**(`mem_gpu_process_private_max`, cold 308 MB · replay 511 MB)는 GPU 메모리(VRAM)가 아니다. 드라이버·ANGLE 의 스테이징 버퍼와 공유 메모리가 들어 있다.
   vsync 를 끈 첫 측정에서는 큐가 쌓여 2.47 GB 까지 올랐다(결정 0021). VRAM 비교는 `mem_gpu`(추정) 로 한다.
 - `mem_js_heap_max` 는 typed array·ArrayBuffer 를 세지 않는 보조 지표다(결정 0020). 비교에는 `mem_cpu` 를 쓴다.
+- first_frame 은 탐색 시작 기준이라 페이지·모듈 로드(three.js 약 1.2 MB)가 섞여 실행마다 흔들린다(cold 961~1,041 ms). 데이터 비용 비교는 event_latency 로 한다.
 - 루프백이라 다운로드에 네트워크 지연·대역폭이 없다. 실제 망에서는 바이트 ÷ 대역폭을 더한다(100 Mbps 면 마지막 스냅샷만 5.4 s).
 
 ## 재현
 
 ```
-cargo build --release -p pointblitz-bench
-copy target\release\pointblitz-bench.exe target\release\pb-replay.exe   # 다른 세션과 이름이 겹치지 않게
-target/release/pb-replay.exe replay --data <ply 폴더> --web . --port 8782
-cd baseline/three && npm ci
-for i in 1..5: node run.mjs --server http://127.0.0.1:8782 --scenario cold  --metrics ../../target/bench/p06/cold-$i.jsonl
-for i in 1..5: node run.mjs --server http://127.0.0.1:8782 --scenario orbit --metrics ../../target/bench/p06/orbit-$i.jsonl
-for i in 1..3: node run.mjs --server http://127.0.0.1:8782 --scenario replay --speed 60 --metrics ../../target/bench/p06/replay60-$i.jsonl
-node run.mjs --server http://127.0.0.1:8782 --scenario replay --speed 1 --metrics ../../target/bench/p06/replay1-1.jsonl
-node aggregate.mjs ../../target/bench/p06 --md <표>
+cd baseline/three && npm ci && cd ../..
+bash baseline/three/suite.sh <ply 폴더> target/bench/p06        # 약 45 분, 끝에 표를 출력한다
+SKIP_X1=1 bash baseline/three/suite.sh <ply 폴더> target/bench/p06   # ×1(33 분) 생략
 ```
-서버는 PID 로 종료한다.
+스크립트는 이름을 바꾼 서버 복사본을 띄우고 PID 로 종료한다.
 
 ## 전체 표 (중앙값 · 최소 · 최대)
 

@@ -82,6 +82,9 @@ const device = {
   browser: `Chrome ${browser.version()}`,
   renderer,
   gpu_driver: sh('nvidia-smi --query-gpu=driver_version --format=csv,noheader'),
+  // Power plan GUID (Windows) and refresh rate: both affect timing (PR #7 review). Headless Chrome runs at 60 Hz.
+  power_plan: sh('powercfg /getactivescheme').match(/[0-9a-f]{8}-[0-9a-f-]{27}/i)?.[0] ?? 'unknown',
+  refresh_hz: 60,
   cpu: os.cpus()[0].model.trim(),
   os: `${os.type()} ${os.release()}`,
 };
