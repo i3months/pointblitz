@@ -22,6 +22,6 @@
 | P1.2 | `pointblitz-core`: 세대·청크 저장소, GPU 버퍼, 점 그리기(결정 0006·0007·0009·0013) | 합성 장면 캡처가 기준 영상과 일치(픽셀 단위 시험) | [x] 2026-10-07 `6adc59c` |
 | P1.3 | 고정 시점 캡처(헤드리스) + SSIM | three.js 캡처 대비 SSIM 기록 | [x] 2026-10-07 `417c613` |
 | P1.4 | `pointblitz-native`: winit 창, 재생 클라이언트 | 14 이벤트 재생 | [x] 2026-10-08 `7f597c5` |
-| P1.5 | native 측정 + 비교표 native 열 | `docs/bench/native.md` | [ ] |
+| P1.5 | native 측정 + 비교표 native 열 | `docs/bench/native.md` | [x] 2026-10-08 `7282c2c` |
 
 P2 이후는 P1 이 끝나면 쪼갠다.
