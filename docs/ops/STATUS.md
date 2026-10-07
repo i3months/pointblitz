@@ -1,12 +1,9 @@
 # STATUS
 
-- 상태: 소유자 결정 대기
-- 현재 작업: P1.2 pointblitz-core(작업자). P0.7 목표 수치는 소유자 확인 중
+- 상태: 진행 중
+- 현재 작업: P1.3 고정 시점 캡처 + SSIM(작업자). 먼저 점 모양 결정(PR #9 검토 중간), 목표 수치 SPEC 반영 PR
 - 마지막 갱신: 2026-10-07 (UTC)
-- 방금 한 일: PR #8 P1.1 pointblitz-io 병합(`9e7ce15`, 감독 검토 통과 — [docs/ops/reviews/pr-8.md](reviews/pr-8.md)), 결정 0022 승인
-- 다음 할 일: 목표 수치 확정 → SPEC §7 갱신 PR. P1.2(시작 전 PR #8 중간 2건 처리)
-- 소유자 결정 대기:
-  - P0.7 목표 수치. 작업자 제안: preview 반영 p50 ≤ 50 ms, refined ≤ 200 ms, cold 첫 화면 ≤ 300 ms, 메인 스레드 블록 0 회, 렌더러 mem_cpu ≤ 300 MB, frame_time p50 ≤ 기준 방식.
-    기준 방식 실측(×60): preview 466.5 ms, refined 609.1 ms, first_frame 990.1 ms, 블록 16 회, mem_cpu 860.7 MB, frame_time p50 2.8 ms.
-    소유자 위임(2026-10-07)에 따라 소유자 응답이 없으면 감독이 정하고 근거를 SPEC §9 에 남긴다.
-- 막힌 점: 없음(P1.1 은 목표 수치와 독립이라 먼저 시작해도 된다)
+- 방금 한 일: PR #9 P1.2 pointblitz-core 병합(`6adc59c`, 감독 검토 통과 — [docs/ops/reviews/pr-9.md](reviews/pr-9.md)), 결정 0023·0024 승인. P0.7 목표 수치 감독 결정(소유자 위임) — [docs/ops/reviews/p0-7-targets.md](reviews/p0-7-targets.md)
+- 다음 할 일: ① 목표 수치를 SPEC 에 반영하는 PR ② 점 모양 결정 기록(기준 방식 2 px = 2×2 실측) ③ P1.3
+- 소유자 결정 대기: 없음(목표 수치는 위임에 따라 감독이 정했다. 소유자가 다르게 정하면 그 값이 우선)
+- 막힌 점: 없음
