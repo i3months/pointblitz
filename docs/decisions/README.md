@@ -33,5 +33,6 @@
 | [0027](0027-native-p15-fixes.md) | P1.5 수정: 요청 때 그리기, 메모리 우선 할당, 차분 꼬리 읽기, 병렬 인코딩 | 승인 |
 | [0028](0028-wasm-build.md) | wasm 빌드 경로(wasm-bindgen CLI 고정, web/build.sh) | 승인 |
 | [0029](0029-web-viewer.md) | 브라우저 뷰어 구조(Rust Viewer + JS 루프, gpu_done) | 승인 |
+| [0030](0030-web-replay-client.md) | 브라우저 재생 클라이언트, 측정기 공용화, 탐색 전 메모리 표본 | 승인 |
 
 "제안" 상태는 작업자가 제안한 것이다. 감독 검토 또는 소유자 확인 뒤 "승인" 이 된다.
