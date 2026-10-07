@@ -186,13 +186,46 @@ pub fn ply_to_chunks(
     generation: u32,
     max_points: usize,
 ) -> Result<Vec<Vec<u8>>, crate::PlyError> {
+    let mut out = Vec::new();
+    ply_tail_to_chunks(ply, generation, 0, max_points, |c| {
+        out.push(c);
+        true
+    })?;
+    Ok(out)
+}
+
+/// Encodes the points of `ply` from record `skip` on, at most `max_points` per chunk, and hands
+/// each chunk to `sink` as soon as it is encoded so a server can stream it (P1.4). Only one chunk's
+/// worth of points is held at a time (PR #8 review); skipped records are not decoded.
+///
+/// The last chunk of the delivery carries [`FLAG_LAST_IN_GENERATION`], and at least one chunk is
+/// produced (empty when nothing is left), so a client always learns that a delivery is complete.
+/// `index` counts chunks within the delivery. Returns the number of chunks handed over; stops early
+/// when `sink` returns false.
+pub fn ply_tail_to_chunks(
+    ply: &[u8],
+    generation: u32,
+    skip: usize,
+    max_points: usize,
+    mut sink: impl FnMut(Vec<u8>) -> bool,
+) -> Result<u32, crate::PlyError> {
     assert!(max_points > 0);
-    let total = crate::ply::parse_header(ply)?.vertex_count;
-    let mut iter = crate::ply::points(ply)?;
-    // Only one chunk's worth of points is held at a time (PR #8 review).
-    let count = total.div_ceil(max_points).max(1);
-    let mut out = Vec::with_capacity(count);
-    let mut part = Vec::with_capacity(max_points.min(total));
+    let h = crate::ply::parse_header(ply)?;
+    let n = h.body_len()?;
+    let body = &ply[h.header_len..];
+    if body.len() < n {
+        return Err(crate::PlyError::Truncated {
+            expected: n,
+            actual: body.len(),
+        });
+    }
+    let skip = skip.min(h.vertex_count);
+    let rest = h.vertex_count - skip;
+    let mut iter = body[skip * h.stride..n]
+        .chunks_exact(h.stride)
+        .map(|rec| h.point(rec));
+    let count = rest.div_ceil(max_points).max(1);
+    let mut part = Vec::with_capacity(max_points.min(rest));
     for i in 0..count {
         part.clear();
         part.extend(iter.by_ref().take(max_points));
@@ -201,9 +234,11 @@ pub fn ply_to_chunks(
         } else {
             0
         };
-        out.push(encode(generation, i as u32, flags, &part));
+        if !sink(encode(generation, i as u32, flags, &part)) {
+            return Ok(i as u32 + 1);
+        }
     }
-    Ok(out)
+    Ok(count as u32)
 }
 
 #[cfg(test)]
@@ -249,6 +284,53 @@ mod tests {
             assert_eq!(back, input[i].position);
         }
         assert!(h.bbox_min[0] <= 0.0 && h.bbox_max[0] >= 0.0);
+    }
+
+    #[test]
+    fn tail_skips_records_and_closes_the_delivery() {
+        let mut ply = b"ply\nformat binary_little_endian 1.0\nelement vertex 5\n\
+            property float x\nproperty float y\nproperty float z\n\
+            property uchar red\nproperty uchar green\nproperty uchar blue\nend_header\n"
+            .to_vec();
+        for i in 0..5u8 {
+            for v in [f32::from(i), 0.0, 0.0] {
+                ply.extend(v.to_le_bytes());
+            }
+            ply.extend([i, 0, 0]);
+        }
+        let collect = |skip: usize, max: usize| {
+            let mut got = Vec::new();
+            let n = ply_tail_to_chunks(&ply, 7, skip, max, |c| {
+                got.push(c);
+                true
+            })
+            .unwrap();
+            assert_eq!(n as usize, got.len());
+            got
+        };
+        let got = collect(3, 1);
+        let h: Vec<_> = got
+            .iter()
+            .map(|c| {
+                let h = decode_header(c).unwrap();
+                (h.generation, h.index, h.point_count, h.flags)
+            })
+            .collect();
+        assert_eq!(h, [(7, 0, 1, 0), (7, 1, 1, FLAG_LAST_IN_GENERATION)]);
+        assert_eq!(&vertex_bytes(&got[0])[12..16], &[3, 0, 0, 255]);
+        // Nothing left: one empty chunk still closes the delivery.
+        let empty = collect(9, 4);
+        assert_eq!(empty.len(), 1);
+        let e = decode_header(&empty[0]).unwrap();
+        assert_eq!((e.point_count, e.flags), (0, FLAG_LAST_IN_GENERATION));
+        // The sink can stop the delivery.
+        let mut seen = 0;
+        let n = ply_tail_to_chunks(&ply, 0, 0, 1, |_| {
+            seen += 1;
+            seen < 2
+        })
+        .unwrap();
+        assert_eq!((n, seen), (2, 2));
     }
 
     #[test]

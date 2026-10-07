@@ -8,6 +8,7 @@
 //! - `GET /manifest.json` — the event list.
 //! - `GET /events?speed=N&start=first|zero` — SSE stream, one `event` per snapshot.
 //! - `GET /data/<file>` — snapshot bytes, uncompressed.
+//! - `GET /chunks/<seq>?have=<generation>.<points>` — the snapshot as PointBlitz chunks (`chunks.rs`).
 //! - `GET /static/<path>` — files under the web root (baseline pages).
 
 use std::io::{BufRead, BufReader, Read, Write};
@@ -176,6 +177,8 @@ struct Server {
     data: PathBuf,
     web: Option<PathBuf>,
     events: Vec<Event>,
+    /// `appends[k]`: snapshot k holds snapshot k − 1 unchanged at its start (crate::chunks).
+    appends: Vec<bool>,
 }
 
 pub fn run(args: &[String]) -> Result<(), String> {
@@ -198,7 +201,24 @@ pub fn run(args: &[String]) -> Result<(), String> {
     }
     let data = data.ok_or("--data <dir> is required")?;
     let events = scan(&data)?;
-    let server = Arc::new(Server { data, web, events });
+    // Checked once on the bytes at startup and treated as snapshot metadata (decision 0026): the
+    // producer knows whether it appended, so this is not part of the per-request work.
+    let mut appends = vec![false; events.len()];
+    let mut prev: Option<Vec<u8>> = None;
+    for (k, e) in events.iter().enumerate() {
+        let path = data.join(&e.file);
+        let bytes = std::fs::read(&path).map_err(|err| format!("{}: {err}", path.display()))?;
+        if let Some(p) = &prev {
+            appends[k] = pointblitz_io::is_prefix(p, &bytes).unwrap_or(false);
+        }
+        prev = Some(bytes);
+    }
+    let server = Arc::new(Server {
+        data,
+        web,
+        events,
+        appends,
+    });
     let listener =
         TcpListener::bind(("127.0.0.1", port)).map_err(|e| format!("bind {port}: {e}"))?;
     eprintln!(
@@ -254,6 +274,18 @@ fn handle(server: &Server, mut stream: TcpStream) -> std::io::Result<()> {
                 None => respond(&mut stream, 404, "text/plain", b"not found"),
             }
         }
+        p if p.starts_with("/chunks/") => {
+            let seq: Option<u32> = p["/chunks/".len()..].parse().ok();
+            match server.events.iter().position(|e| Some(e.seq) == seq) {
+                Some(idx) => serve_chunks(
+                    server,
+                    &mut stream,
+                    idx,
+                    q("have").and_then(crate::chunks::parse_have),
+                ),
+                None => respond(&mut stream, 404, "text/plain", b"not found"),
+            }
+        }
         p if p.starts_with("/static/") => {
             match server
                 .web
@@ -299,6 +331,57 @@ fn stream_events(
     }
     write!(stream, "event: end\ndata: {{}}\n\n")?;
     stream.flush()
+}
+
+/// Converts snapshot `idx` and streams its chunks (crate::chunks). The body has no length: the
+/// client reads chunks until the one flagged last, and the connection closes.
+fn serve_chunks(
+    server: &Server,
+    stream: &mut TcpStream,
+    idx: usize,
+    have: Option<(u32, usize)>,
+) -> std::io::Result<()> {
+    use crate::chunks::{MAX_POINTS, Plan, plan};
+    let t0 = Instant::now();
+    let ply = std::fs::read(server.data.join(&server.events[idx].file))?;
+    let p = plan(&server.events, idx, have, |k| server.appends[k]);
+    let (generation, skip, kind) = match p {
+        Plan::Full { generation } => (generation, 0, "full"),
+        Plan::Delta { generation, skip } => (generation, skip, "delta"),
+    };
+    let read_ms = t0.elapsed().as_secs_f64() * 1e3;
+    write!(
+        stream,
+        "HTTP/1.1 200 OK\r\nContent-Type: application/x-pointblitz-chunks\r\n\
+         X-PB-Delivery: {kind}\r\nX-PB-Generation: {generation}\r\n\
+         Cache-Control: no-store\r\nConnection: close\r\n\r\n"
+    )?;
+    let mut sent = 0u64;
+    let mut write_err = None;
+    let res = pointblitz_io::chunk::ply_tail_to_chunks(&ply, generation, skip, MAX_POINTS, |c| {
+        match stream.write_all(&c) {
+            Ok(()) => {
+                sent += c.len() as u64;
+                true
+            }
+            Err(e) => {
+                write_err = Some(e);
+                false
+            }
+        }
+    });
+    if let Some(e) = write_err {
+        return Err(e);
+    }
+    let chunks = res.map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+    stream.flush()?;
+    eprintln!(
+        "chunks: seq {} {kind} gen {generation} skip {skip} -> {chunks} chunks, {sent} B, \
+         read {read_ms:.1} ms, total {:.1} ms",
+        server.events[idx].seq,
+        t0.elapsed().as_secs_f64() * 1e3
+    );
+    Ok(())
 }
 
 fn serve_file(stream: &mut TcpStream, path: &Path) -> std::io::Result<()> {

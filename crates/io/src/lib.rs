@@ -12,5 +12,5 @@ pub mod chunk;
 pub mod ply;
 pub mod stream;
 
-pub use ply::{Header, PlyError, Point, ScalarType, parse_header, points};
+pub use ply::{Header, PlyError, Point, ScalarType, is_prefix, parse_header, points};
 pub use stream::PlyStream;

@@ -268,6 +268,27 @@ pub fn points(bytes: &[u8]) -> Result<impl Iterator<Item = Point> + '_, PlyError
         .map(move |rec| h.point(rec)))
 }
 
+/// True when `next` starts with every vertex record of `prev`, unchanged and in order, with the same
+/// property layout — a preview that only appends points (docs/data/flight-01.md §2).
+pub fn is_prefix(prev: &[u8], next: &[u8]) -> Result<bool, PlyError> {
+    let a = parse_header(prev)?;
+    let b = parse_header(next)?;
+    let same_layout =
+        (a.stride, a.position, a.color, a.normal) == (b.stride, b.position, b.color, b.normal);
+    if !same_layout || b.vertex_count < a.vertex_count {
+        return Ok(false);
+    }
+    let n = a.body_len()?;
+    let (pa, pb) = (&prev[a.header_len..], &next[b.header_len..]);
+    if pa.len() < n || pb.len() < n {
+        return Err(PlyError::Truncated {
+            expected: n,
+            actual: pa.len().min(pb.len()),
+        });
+    }
+    Ok(pa[..n] == pb[..n])
+}
+
 fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     haystack.windows(needle.len()).position(|w| w == needle)
 }
@@ -290,6 +311,24 @@ mod tests {
 
     fn f(v: f32) -> [u8; 4] {
         v.to_le_bytes()
+    }
+
+    #[test]
+    fn prefix_means_same_records_at_the_start() {
+        let props = "property float x\nproperty float y\nproperty float z\n";
+        let rec = |v: f32| [f(v), f(0.0), f(0.0)].concat();
+        let a = ply(props, &[rec(1.0), rec(2.0)]);
+        let b = ply(props, &[rec(1.0), rec(2.0), rec(3.0)]);
+        let c = ply(props, &[rec(1.0), rec(9.0), rec(3.0)]);
+        assert_eq!(is_prefix(&a, &b), Ok(true));
+        assert_eq!(is_prefix(&a, &a), Ok(true));
+        assert_eq!(is_prefix(&a, &c), Ok(false)); // a record changed
+        assert_eq!(is_prefix(&b, &a), Ok(false)); // fewer points
+        let other = ply(
+            "property float y\nproperty float x\nproperty float z\n",
+            &[rec(1.0), rec(2.0), rec(3.0)],
+        );
+        assert_eq!(is_prefix(&a, &other), Ok(false)); // same bytes, different layout
     }
 
     /// skyrecon `XyzRgbNormal`: x y z, red green blue, nx ny nz — 27 bytes.
