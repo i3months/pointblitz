@@ -17,10 +17,11 @@ mod viewpoints;
 
 use std::process::ExitCode;
 
-const USAGE: &str = "usage:\n  pointblitz-bench viewpoints <final.ply> <out.json>\n  \
-                     pointblitz-bench replay --data <dir> [--web <dir>] [--port 8700]
-  \n                     pointblitz-bench capture --ply <file> --viewpoints <json> --out <dir>
-  \n                     pointblitz-bench compare <dir A> <dir B> [--viewpoints <json>] [--md <file>]";
+const USAGE: &str = "usage:
+  pointblitz-bench viewpoints <final.ply> <out.json>
+  pointblitz-bench replay --data <dir> [--web <dir>] [--port 8700]
+  pointblitz-bench capture --ply <file> --viewpoints <json> --out <dir>
+  pointblitz-bench compare <dir A> <dir B> [--viewpoints <json>] [--md <file>]";
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
