@@ -2,3 +2,4 @@ target/
 *.ply
 node_modules/
 /out/
+bench/data/*/
