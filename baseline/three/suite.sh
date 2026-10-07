@@ -22,7 +22,9 @@ cp target/release/pointblitz-bench$( [ -f target/release/pointblitz-bench.exe ] 
 mkdir -p "$OUT"
 "$BIN" replay --data "$DATA" --web . --port "$PORT" > "$OUT/server.log" 2>&1 &
 SERVER=$!
-trap 'kill "$SERVER" 2>/dev/null || true' EXIT
+# Git Bash: $! is an MSYS pid; stop the Windows process by its own pid as well.
+stop_server() { local w; w=$(cat "/proc/$SERVER/winpid" 2>/dev/null); kill "$SERVER" 2>/dev/null; [ -n "$w" ] && taskkill //F //PID "$w" > /dev/null 2>&1; true; }
+trap stop_server EXIT
 sleep 1
 
 ABS_OUT=$(cd "$OUT" && pwd)

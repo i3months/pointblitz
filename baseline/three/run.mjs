@@ -40,7 +40,8 @@ const sampler = setInterval(async () => {
 }, 250);
 
 const t0 = Date.now();
-await page.goto(`${server}/static/baseline/three/index.html?scenario=${scenario}&speed=${speed}`);
+// --query a=b&c=d appends page parameters (A/B switches).
+await page.goto(`${server}/static/baseline/three/index.html?scenario=${scenario}&speed=${speed}${args.query ? `&${args.query}` : ''}`);
 const procs = await chromeProcessIds(browser);
 const stopProc = sampleProcesses([...procs.renderer, ...procs.gpu]);
 await page.waitForFunction(() => window.__pb?.done, null, { timeout: 3_600_000, polling: 500 });
