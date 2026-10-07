@@ -31,6 +31,8 @@ pub enum Msg {
         seq: u32,
         bytes: Vec<u8>,
         last: bool,
+        /// When the chunk's last byte arrived.
+        at: Instant,
     },
     Delivered {
         seq: u32,
@@ -38,6 +40,8 @@ pub enum Msg {
         generation: u32,
         bytes: u64,
         fetch_start: Instant,
+        /// Response headers received: the server has read the snapshot and starts converting.
+        headers_at: Instant,
     },
     End,
     Error(String),
@@ -122,18 +126,20 @@ pub fn read_chunk(r: &mut impl Read) -> std::io::Result<Option<Vec<u8>>> {
     Ok(Some(buf))
 }
 
-/// Streams one snapshot's chunks to `send`. Returns (delivery kind, generation, bytes).
+/// Streams one snapshot's chunks to `send`. Returns (delivery kind, generation, bytes, when the
+/// response headers arrived).
 fn fetch(
     host: &str,
     seq: u32,
     have: Option<(u32, usize)>,
     send: &impl Fn(Msg),
-) -> std::io::Result<(String, u32, u64)> {
+) -> std::io::Result<(String, u32, u64, Instant)> {
     let path = match have {
         Some((g, n)) => format!("/chunks/{seq}?have={g}.{n}"),
         None => format!("/chunks/{seq}"),
     };
     let (headers, mut r) = get(host, &path)?;
+    let headers_at = Instant::now();
     let delivery = header(&headers, "x-pb-delivery").unwrap_or("?").to_string();
     let generation = header(&headers, "x-pb-generation")
         .and_then(|g| g.parse().ok())
@@ -146,12 +152,13 @@ fn fetch(
             seq,
             bytes: c,
             last,
+            at: Instant::now(),
         });
         if last {
             break;
         }
     }
-    Ok((delivery, generation, bytes))
+    Ok((delivery, generation, bytes, headers_at))
 }
 
 /// Takes snapshots in arrival order and fetches each one; `have` tracks what the client holds.
@@ -160,7 +167,7 @@ fn fetch_loop(host: &str, rx: mpsc::Receiver<Snapshot>, send: &impl Fn(Msg)) {
     for snap in rx {
         let fetch_start = Instant::now();
         match fetch(host, snap.seq, have, send) {
-            Ok((delivery, generation, bytes)) => {
+            Ok((delivery, generation, bytes, headers_at)) => {
                 have = Some((generation, snap.points));
                 send(Msg::Delivered {
                     seq: snap.seq,
@@ -168,6 +175,7 @@ fn fetch_loop(host: &str, rx: mpsc::Receiver<Snapshot>, send: &impl Fn(Msg)) {
                     generation,
                     bytes,
                     fetch_start,
+                    headers_at,
                 });
             }
             Err(e) => {

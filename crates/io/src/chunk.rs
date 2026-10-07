@@ -220,25 +220,51 @@ pub fn ply_tail_to_chunks(
         });
     }
     let skip = skip.min(h.vertex_count);
-    let rest = h.vertex_count - skip;
-    let mut iter = body[skip * h.stride..n]
-        .chunks_exact(h.stride)
-        .map(|rec| h.point(rec));
-    let count = rest.div_ceil(max_points).max(1);
-    let mut part = Vec::with_capacity(max_points.min(rest));
+    let records = &body[skip * h.stride..n];
+    let count = chunk_count(h.vertex_count - skip, max_points);
     for i in 0..count {
-        part.clear();
-        part.extend(iter.by_ref().take(max_points));
         let flags = if i + 1 == count {
             FLAG_LAST_IN_GENERATION
         } else {
             0
         };
-        if !sink(encode(generation, i as u32, flags, &part)) {
+        let part = chunk_records(&h, records, max_points, i);
+        if !sink(encode_records(&h, part, generation, i as u32, flags)) {
             return Ok(i as u32 + 1);
         }
     }
     Ok(count as u32)
+}
+
+/// Chunks needed for `points` points: at least one, since an empty delivery still closes.
+pub fn chunk_count(points: usize, max_points: usize) -> usize {
+    assert!(max_points > 0);
+    points.div_ceil(max_points).max(1)
+}
+
+/// The records of chunk `i` when `records` is split into chunks of `max_points` points.
+pub fn chunk_records<'a>(
+    h: &crate::Header,
+    records: &'a [u8],
+    max_points: usize,
+    i: usize,
+) -> &'a [u8] {
+    let start = (i * max_points * h.stride).min(records.len());
+    let end = ((i + 1) * max_points * h.stride).min(records.len());
+    &records[start..end]
+}
+
+/// Encodes whole vertex records (`h.stride` bytes each) as one chunk. Chunks are independent, so a
+/// server can encode the chunks of one delivery in parallel and still send them in order.
+pub fn encode_records(
+    h: &crate::Header,
+    records: &[u8],
+    generation: u32,
+    index: u32,
+    flags: u32,
+) -> Vec<u8> {
+    let points: Vec<Point> = records.chunks_exact(h.stride).map(|r| h.point(r)).collect();
+    encode(generation, index, flags, &points)
 }
 
 #[cfg(test)]
