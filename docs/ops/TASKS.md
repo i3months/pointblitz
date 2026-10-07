@@ -36,4 +36,17 @@
 | P2.4 | WebGPU 가 없을 때 WebGL2(wgpu GL 백엔드)로 대체 | WebGPU 를 끈 Chrome 에서 14 이벤트 재생 + 고정 시점 SSIM 기록. 지원하지 않는 기능이 있으면 결정 기록 | [x] 2026-10-08 `df8182e` |
 | P2.5 | browser 측정 + 비교표 browser 열: three.js · native 와 같은 세션 번갈아(`bench/suite.sh` 확장), WebGPU·WebGL2 둘 다 | `docs/bench/browser.md`. `mem_cpu` 판정은 SPEC 대로 렌더러 프로세스, GPU 프로세스 값을 함께 싣는다(PR #13 검토). wasm 크기·로드 시간 기록 | [x] 2026-10-08 `8de61d8` |
 
-P3 이후는 P2 가 끝나면 쪼갠다.
+## P3 — server video
+
+서버가 같은 `pointblitz-core` 로 헤드리스 렌더 → NVENC H.264 → WebSocket, 브라우저는 WebCodecs 로 디코드해 캔버스에 그리고 입력(카메라)을 같은 연결로 되돌려 보낸다(결정 0010).
+서버는 재생 서버의 스냅샷을 그대로 따른다(`/events`·`/chunks` 와 같은 데이터). 대역폭·메모리는 기록만(INTENT 원칙 2) — 화질과 지연을 우선해 비트레이트를 정한다.
+
+| # | 작업 | 완료 기준 | 상태 |
+|---|---|---|---|
+| P3.0 | 목표 수치(SPEC §7.1 "서버 영상은 P3 착수 때 정한다") — 제안은 [docs/notes/p3-targets-proposal.md](../notes/p3-targets-proposal.md) | 소유자 결정이 SPEC §7.1·§9 에 들어간다(P3.4 측정 전) | [ ] |
+| P3.1 | 인코더 경로: 헤드리스 프레임(1920×1080) → NVENC H.264. NVENC 직접 호출(FFI) / 외부 ffmpeg 프로세스 등 비교 결정 기록(GPU→인코더 복사 여부, `unsafe` 범위, 라이선스) | 고정 시점 8곳·orbit 프레임을 인코딩→디코딩해 원본 렌더 대비 SSIM 과 프레임당 인코딩 시간(p50/p95/p99), 비트레이트를 기록한다 | [ ] |
+| P3.2 | `pointblitz-server`: 재생 서버를 따라 장면을 갱신하고(세대·차분, 결정 0026 경로 재사용), 프레임을 인코딩해 WebSocket 으로 보냄. 프레임마다 메타데이터(프레임 번호, 반영된 스냅샷, 렌더·인코딩 시각, 마지막으로 반영한 입력 번호) | 14 이벤트 재생 동안 영상이 끊기지 않고 나가며, 테스트 클라이언트(헤드리스)가 받은 프레임 수·메타데이터를 검증한다 | [ ] |
+| P3.3 | 브라우저 클라이언트: WebSocket 수신 → WebCodecs 디코드 → 캔버스, 마우스·키 입력을 번호와 함께 보냄. 마크(결정 0020 이름 + 입력→표시) | 14 이벤트가 브라우저 화면에 나타나고, 입력 번호가 돌아온 프레임으로 입력→표시 지연을 기록한다. `main_thread_block` 확인(판정은 P3.4) | [ ] |
+| P3.4 | server video 측정 + 비교표 server video 열: three.js·native·browser 와 같은 세션 번갈아(`bench/suite.sh` 확장), 고정 시점 영상 SSIM(대 native 캡처), 비트레이트·인코딩·디코딩 시간, 서버 GPU 사용 | `docs/bench/server-video.md`, SPEC §7.1(P3.0 에서 정한 값) 판정 | [ ] |
+
+WebRTC 비교(결정 0010 "P3 이후")는 P3.4 결과를 보고 따로 쪼갠다. P4 이후는 P3 가 끝나면 쪼갠다.
