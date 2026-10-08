@@ -50,7 +50,7 @@ await new Promise((r) => setTimeout(r, 1500)); // let it bind and open the encod
 
 const client = spawn(process.execPath, ['run.mjs', '--server', server, '--target', 'video',
   '--query', `ws=ws://127.0.0.1:${port}&inputs=1`, '--scenario', scenario, '--speed', String(speed),
-  '--metrics', path.resolve(metrics)], { cwd: 'baseline/three', stdio: ['ignore', 'ignore', 'inherit'] });
+  '--metrics', path.resolve(metrics), ...(args.raw ? ['--raw', path.resolve(args.raw)] : [])], { cwd: 'baseline/three', stdio: ['ignore', 'ignore', 'inherit'] });
 const clientCode = await new Promise((resolve) => client.on('exit', resolve));
 await Promise.race([finished, serveExit]);
 const serveCode = await serveExit;

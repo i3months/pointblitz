@@ -71,6 +71,8 @@ const raw = await page.evaluate(() => ({
   cycles: window.__pb.cycles,
   decodeMs: window.__pb.decodeMs,
   stages: window.__pb.stages,
+  frameTimes: window.__pb.frameTimes,
+  cycleDraws: window.__pb.cycleDraws,
 }));
 const renderer = await page.evaluate(() => {
   if (window.__pb.cycles) return 'server video (NVENC H.264) → WebCodecs → canvas 2D';
