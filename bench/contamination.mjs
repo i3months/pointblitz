@@ -22,7 +22,8 @@ const C4_CPU = 0.9;
 const C4_LATE_PCT = 1;
 const cpuRef = JSON.parse(fs.readFileSync(new URL('./cpu-reference.json', import.meta.url), 'utf8')).iters_per_s;
 
-const runs = fs.readdirSync(dir).filter((f) => f.endsWith('.jsonl')).map((f) => f.slice(0, -'.jsonl'.length));
+// First attempts the suite redid (<run>.tryN-*.jsonl) are kept for the record, not checked.
+const runs = fs.readdirSync(dir).filter((f) => f.endsWith('.jsonl') && !/\.try\d+-/.test(f)).map((f) => f.slice(0, -'.jsonl'.length));
 const median = (v) => {
   const s = [...v].sort((a, b) => a - b);
   return s.length ? s[Math.floor((s.length - 1) / 2)] : NaN;
