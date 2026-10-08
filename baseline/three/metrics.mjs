@@ -97,6 +97,25 @@ export function summarize(raw, { device, commit, target = 'three.js' }) {
     }
   }
 
+  // Server video (P3.3, SPEC §7.1): input → display = input sent → the first drawn frame whose
+  // metadata shows that input applied; frame drop = 60 Hz display cycles with no new video frame.
+  const inputs = (raw.inputs ?? []).filter((i) => i.shown != null).map((i) => i.shown - i.sent);
+  if (raw.inputs?.length) {
+    const s = [...inputs].sort((a, b) => a - b);
+    out.push(rec('input_latency_p50', percentile(s, 0.5), 'ms', s.length));
+    out.push(rec('input_latency_p95', percentile(s, 0.95), 'ms', s.length));
+    out.push(rec('input_latency_max', s[s.length - 1], 'ms', s.length));
+    out.push(rec('input_unanswered', raw.inputs.length - inputs.length, 'count', raw.inputs.length));
+  }
+  if (raw.decodeMs?.length) {
+    const s = [...raw.decodeMs].sort((a, b) => a - b);
+    out.push(rec('video_decode_ms_p50', percentile(s, 0.5), 'ms', s.length));
+    out.push(rec('video_decode_ms_p95', percentile(s, 0.95), 'ms', s.length));
+  }
+  if (raw.cycles?.total) {
+    out.push(rec('video_frame_missed_pct', (100 * raw.cycles.missed) / raw.cycles.total, '%', raw.cycles.total));
+  }
+
   // Event latency split: submitted (render() returned) vs presented (GPU done) for the swap frame.
   for (const s of by('submitted')) {
     const p = by('presented').find((m) => m.seq === s.seq);

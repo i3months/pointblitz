@@ -3,7 +3,7 @@
 //
 // usage: node run.mjs --server http://127.0.0.1:8700 --scenario replay|cold|orbit|memtest|memspike
 //                     [--speed 60] [--metrics <file.jsonl>] [--raw <file.json>] [--chrome <path>] [--headed]
-//                     [--target three.js|web]   (web = PointBlitz web/index.html; default three.js)
+//                     [--target three.js|web|video]   (web = PointBlitz web/index.html, video = web/video.html; default three.js)
 //                     [--label <name>]          (implementation name in the records, e.g. web-webgl2)
 //
 // Raw hooks come from window.__pb (marks, frames, longtasks, syncFrames). Memory: JS heap over CDP
@@ -23,7 +23,8 @@ const scenario = args.scenario ?? 'replay';
 const speed = Number(args.speed ?? 60);
 const chrome = args.chrome ?? CHROME;
 const target = args.target ?? 'three.js';
-const pagePath = target === 'web' ? 'web/index.html' : 'baseline/three/index.html';
+// video = the server-video client (P3.3); give the server URL with --query ws=ws://127.0.0.1:<port>.
+const pagePath = { web: 'web/index.html', video: 'web/video.html' }[target] ?? 'baseline/three/index.html';
 
 const browser = await chromium.launch({
   executablePath: chrome,
@@ -66,8 +67,12 @@ const raw = await page.evaluate(() => ({
   frames: window.__pb.frames,
   longtasks: window.__pb.longtasks,
   syncFrames: window.__pb.syncFrames,
+  inputs: window.__pb.inputs,
+  cycles: window.__pb.cycles,
+  decodeMs: window.__pb.decodeMs,
 }));
 const renderer = await page.evaluate(() => {
+  if (window.__pb.cycles) return 'server video (NVENC H.264) → WebCodecs → canvas 2D';
   if (window.__pb.gpu) return `${window.__pb.gpu.vendor} ${window.__pb.gpu.architecture} (WebGPU, ${window.__pb.info?.format})`;
   const gl = document.querySelector('canvas').getContext('webgl2');
   const ext = gl.getExtension('WEBGL_debug_renderer_info');
@@ -101,7 +106,7 @@ const sh = (cmd) => {
 };
 const commit = sh('git describe --always --dirty --abbrev=7');
 const device = {
-  impl: target === 'web' ? 'PointBlitz web (wgpu 30.0.1)' : 'three.js 0.185.1',
+  impl: { web: 'PointBlitz web (wgpu 30.0.1)', video: 'PointBlitz server video (NVENC H.264 → WebSocket → WebCodecs)' }[target] ?? 'three.js 0.185.1',
   browser: `Chrome ${browser.version()}`,
   renderer,
   gpu_driver: sh('nvidia-smi --query-gpu=driver_version --format=csv,noheader'),

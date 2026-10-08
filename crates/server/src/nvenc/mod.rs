@@ -165,6 +165,10 @@ impl Encoder {
             };
             cfg.encodeCodecConfig.h264Config.idrPeriod = NVENC_INFINITE_GOPLENGTH;
             cfg.encodeCodecConfig.h264Config.set_repeatSPSPPS(1);
+            // VUI bitstream_restriction: with no B frames NVENC writes max_num_reorder_frames = 0, so a
+            // decoder can output each frame at once instead of holding frames for reordering (P3.3:
+            // without it the browser decoder added about four frames of delay).
+            cfg.encodeCodecConfig.h264Config.h264VUIParameters.bitstreamRestrictionFlag = 1;
 
             let mut init = NV_ENC_INITIALIZE_PARAMS {
                 version: NV_ENC_INITIALIZE_PARAMS_VER,

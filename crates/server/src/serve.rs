@@ -4,7 +4,7 @@
 //! ```text
 //! pointblitz-server serve --replay http://127.0.0.1:8700 [--port 8720] [--speed 60] [--qp 18]
 //!                         [--fps 60] [--viewpoints bench/viewpoints/flight-01.json] [--view overview_sw]
-//!                         [--exit-after-end <s>] [--wait-for-client]
+//!                         [--exit-after-end <s>] [--wait-for-client] [--cold]
 //! ```
 //!
 //! Each frame is one binary WebSocket message: `u32 LE metadata length`, the metadata (UTF-8 JSON),
@@ -15,6 +15,9 @@
 //!
 //! `--wait-for-client` starts following the replay only once a client is connected, so a test or
 //! measurement client sees every snapshot from the first.
+//!
+//! The server also sends text messages `{"type":"snapshot","seq","kind"}` the moment a snapshot
+//! is announced to it, so clients can stamp `snapshot_received` (P3.3).
 //!
 //! Clients send text messages: `{"id":n,"type":"orbit","dx":px,"dy":px}`, `{"id":n,"type":"zoom",
 //! "steps":s}`, `{"id":n,"type":"view","name":"north"}`. A client joining forces an IDR.
@@ -107,12 +110,26 @@ pub fn frame_message(meta: &str, h264: &[u8]) -> Vec<u8> {
     out
 }
 
-type Clients = Arc<Mutex<Vec<mpsc::Sender<Arc<Vec<u8>>>>>>;
+/// What goes to a client: a frame (binary) or an announcement (text).
+#[derive(Clone)]
+enum Out {
+    Frame(Arc<Vec<u8>>),
+    Text(Arc<String>),
+}
+
+type Clients = Arc<Mutex<Vec<mpsc::Sender<Out>>>>;
+
+fn broadcast(clients: &Clients, out: &Out) {
+    clients
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .retain(|c| c.send(out.clone()).is_ok());
+}
 
 /// One thread per client: write frames from the channel, read input with a short timeout.
 fn client_thread(
     stream: TcpStream,
-    frames: mpsc::Receiver<Arc<Vec<u8>>>,
+    frames: mpsc::Receiver<Out>,
     inputs: mpsc::Sender<(u64, Input)>,
 ) {
     let _ = stream.set_nodelay(true);
@@ -140,8 +157,12 @@ fn client_thread(
         }
         // Send everything queued; the newest frame matters most, but P frames depend on every
         // earlier one, so none is dropped here.
-        while let Ok(f) = frames.try_recv() {
-            if ws.send(Message::Binary(f.as_ref().clone().into())).is_err() {
+        while let Ok(out) = frames.try_recv() {
+            let msg = match out {
+                Out::Frame(f) => Message::Binary(f.as_ref().clone().into()),
+                Out::Text(t) => Message::Text(t.as_str().into()),
+            };
+            if ws.send(msg).is_err() {
                 return;
             }
         }
@@ -211,6 +232,8 @@ pub fn run(args: &[String]) -> Result<(), String> {
     let (views, w, h) =
         load_views(arg(args, "--viewpoints").unwrap_or("bench/viewpoints/flight-01.json"))?;
     let start_view = arg(args, "--view").unwrap_or("overview_sw");
+    // --cold: only the last snapshot, as one full delivery (SPEC §6.1 cold).
+    let cold = args.iter().any(|a| a == "--cold");
     let mut camera = views
         .list
         .iter()
@@ -262,9 +285,14 @@ pub fn run(args: &[String]) -> Result<(), String> {
     let (msg_tx, msg_rx) = mpsc::channel::<Msg>();
     let host = client::host_port(replay)?;
     let msg_tx = Mutex::new(msg_tx);
-    client::spawn_replay(host, speed, move |m| {
+    let send = move |m| {
         let _ = msg_tx.lock().unwrap_or_else(|e| e.into_inner()).send(m);
-    });
+    };
+    if cold {
+        client::spawn_cold(host, send);
+    } else {
+        client::spawn_replay(host, speed, send);
+    }
 
     let t0 = Instant::now();
     let tick = Duration::from_secs_f64(1.0 / f64::from(fps));
@@ -294,7 +322,16 @@ pub fn run(args: &[String]) -> Result<(), String> {
                 }
                 Msg::End => ended_at = Some(Instant::now()),
                 Msg::Error(e) => eprintln!("replay: {e}"),
-                Msg::Received { .. } | Msg::Delivered { .. } => {}
+                // Forward the announcement at once: a client stamps snapshot_received when this
+                // arrives, so event_latency starts where the event reaches the server (P3.3).
+                Msg::Received { snap, .. } => broadcast(
+                    &clients,
+                    &Out::Text(Arc::new(format!(
+                        r#"{{"type":"snapshot","seq":{},"kind":"{}"}}"#,
+                        snap.seq, snap.kind
+                    ))),
+                ),
+                Msg::Delivered { .. } => {}
             }
         }
         while let Ok((id, input)) = input_rx.try_recv() {
@@ -319,11 +356,10 @@ pub fn run(args: &[String]) -> Result<(), String> {
             scene.points()
         )
         .unwrap();
-        let message = Arc::new(frame_message(&meta, &f.bytes));
-        clients
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .retain(|c| c.send(message.clone()).is_ok());
+        broadcast(
+            &clients,
+            &Out::Frame(Arc::new(frame_message(&meta, &f.bytes))),
+        );
         frame += 1;
 
         if let (Some(at), Some(secs)) = (ended_at, exit_after_end)
