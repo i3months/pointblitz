@@ -151,7 +151,7 @@ B1\* = 지표마다 B1a·B1b 중 좋은 쪽(괄호에 표시, 가장 강한 thre
 ### 7.4 결론(모호함 없이)
 - **그리기(batch=30, GPU timestamp 와 방향 일치)**
   - **WebGPU 끼리: PointBlitz 가 1.51 배 빠르다**(web 1.41 대 three.js B1-webgpu 2.13 ms/프레임, 95 % [1.50–1.52]; timestamp 1.55 배).
-  - **WebGL2 끼리: three.js 가 약 3.2 배 빠르다**(B1a 1.56 대 PointBlitz webgl 5.00 ms, 비 0.31 [0.31–0.31]; timestamp 0.31). wgpu 의 WebGL2 백엔드 경로가 느리다.
+  - **WebGL2 끼리: three.js 가 약 3.2 배 빠르다**(B1a 1.56 대 PointBlitz webgl 5.00 ms, 비 0.31 [0.31–0.31]; timestamp 0.31). 원인 나누기는 §7.5(진단): 점마다 사각형으로 그리는 방식이 설명하는 몫은 약 0.5 ms 이고, 나머지 약 2.8 ms 는 PointBlitz 의 WebGL2 경로에만 있다.
   - 참고(API 다름): native(Vulkan) 1.36 대 three.js WebGL2 1.56 ms(1.15 배).
 - **지연(10 회, 95 % 구간)**
   - **WebGPU 끼리**: 미리보기만 PointBlitz 가 빠르다(1.17 배 [1.07–1.30], 25.8 대 30.1 ms). 정밀·cold 는 차이 없음.
@@ -160,3 +160,16 @@ B1\* = 지표마다 B1a·B1b 중 좋은 쪽(괄호에 표시, 가장 강한 thre
 - **남는 차이**: 메인 스레드 멈춤(재생) — B1a 2 회(113 ms), PointBlitz webgl 1 회(67.5 ms), B1b·B1-webgpu·web 0 회. mem_cpu(재생) — web 183 MB 대 B1-webgpu 287 MB(WebGPU 끼리 1.57 배), WebGL2 끼리는 webgl 206 대 B1a 215·B1b 222 MB 로 비슷.
 - 그래서 **Rust·wgpu·wasm 의 몫은 "WebGPU 에서 그리기 1.5 배, 미리보기 지연 1.17 배, 메모리 1.6 배 적음" 이고, WebGL2 에서는 오히려 three.js 가 그리기 3.2 배·미리보기 지연 1.2 배 빠르다.** 새 데이터가 화면에 나오는 시간의 큰 이득(B0 대비 5–15 배)은 구조에서 온다(§3).
 - §4 의 결론 중 "그리기는 깨끗한 같은 API 비교가 없다" 는 이 절로 대체한다. §4.2 의 "PointBlitz WebGL2 약 4.5–5 ms" 는 고친 측정의 5.00 ms(timestamp 4.86)로 확인됐다.
+
+### 7.5 진단 — WebGL2 에서 PointBlitz 가 느린 원인 나누기(판정 아님, 감독 지시, #72 검토)
+- 후보 둘: (가) 그리는 방식 — PointBlitz 는 점마다 인스턴스 사각형(6 정점)을 그리고, three.js WebGL2 기준(B1)은 GL 점 프리미티브(정점 1 개 + 점 스프라이트)를 쓴다. (나) PointBlitz 의 WebGL2 경로(wgpu GL 백엔드와 그 위의 PointBlitz 그리기 설정).
+- 방법: three.js `WebGPURenderer({ forceWebGL: true })` 로 B1-webgpu 와 **같은 인스턴스 사각형 그리기**를 WebGL2 에서(`mode=b1&renderer=webgpu&forcewebgl=1`, suite 대상 `three-b1-forcewebgl`). 세션 **p49d**(03:31–03:33), orbit batch=30 3 회씩, 같은 세션 참고 3 대상, C1–C4. three-b1-forcewebgl 1 회째 C1 무효 → 재실행 유효. **B1-webgpu 1 회째는 재실행까지 C3 무효(29.99 → 104.17 Hz)** 라 유효 2 회만 쓴다(참고 대상).
+
+| 대상(같은 세션) | 그리는 방식 | API | total p50 (3 회) | GPU timestamp p50 (3 회) |
+|---|---|---|---|---|
+| three.js B1a | 점 프리미티브 | WebGL2 | 1.68 · 1.62 · 1.57 | 1.65 · 1.58 · 1.53 |
+| **three.js 인스턴스 사각형(forceWebGL)** | 인스턴스 사각형 | WebGL2 | 2.23 · 2.23 · 2.23 | **2.10 · 2.10 · 2.10** |
+| three.js B1-webgpu | 인스턴스 사각형 | WebGPU | — · 2.15 · 2.14 | — · 2.03 · 2.04 |
+| PointBlitz webgl | 인스턴스 사각형 | WebGL2 | 5.00 · 5.00 · 5.00 | 4.86 · 4.86 · 4.87 |
+
+- 결과: WebGL2 에서 같은 인스턴스 사각형을 three.js 가 그리면 2.10 ms 로, 감독이 정한 기준(약 4.8 ms 면 원인 = 사각형, 약 1.5 ms 면 원인 = wgpu GL)의 **사이**다. 숫자 그대로: **사각형 방식의 몫 ≈ 0.5 ms(1.6 → 2.1 ms), PointBlitz WebGL2 경로에만 있는 몫 ≈ 2.8 ms(2.1 → 4.86 ms)**. 그 2.8 ms 가 wgpu GL 백엔드 안의 어디(상태 변경, 청크별 바인드 그룹·동적 오프셋, 버퍼 바인딩 등)에서 오는지는 이번에 가르지 않았다.

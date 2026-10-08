@@ -16,6 +16,8 @@
 //   mode     = full | b1 | b2
 //   renderer = webgl (default) | webgpu   (b1 only: three.js WebGPURenderer, decision 0048)
 //   upload   = a (default) | b            (b1 upload, chosen by smoke — decision 0048)
+//   forcewebgl = 1                        (renderer=webgpu only, diagnosis: the same instanced-quad
+//                                          drawing on three.js's WebGL2 backend — #72 review)
 //
 // Measurement hooks live on window.__pb (read by the harness):
 //   marks   [{name, t, ...}]  t = performance.now() in ms
@@ -52,7 +54,7 @@ new PerformanceObserver((list) => {
 const mark = (name, extra = {}) => pb.marks.push({ name, t: performance.now(), ...extra });
 
 const renderer = webgpu
-  ? new THREE.WebGPURenderer({ antialias: false, trackTimestamp: scenario === 'orbit' }) // timestamps: decision 0049
+  ? new THREE.WebGPURenderer({ antialias: false, trackTimestamp: scenario === 'orbit', forceWebGL: params.get('forcewebgl') === '1' }) // timestamps: decision 0049
   : new THREE.WebGLRenderer({ antialias: false, preserveDrawingBuffer: true });
 renderer.setPixelRatio(1);
 renderer.setSize(WIDTH, HEIGHT);
@@ -61,7 +63,7 @@ if (webgpu) {
   await renderer.init();
   const info = renderer.backend.adapter?.info ?? {};
   pb.gpu = { vendor: info.vendor ?? '?', architecture: info.architecture ?? '?' };
-  pb.info = { format: 'three.js WebGPURenderer' };
+  pb.info = { format: renderer.backend.isWebGLBackend ? 'three.js WebGPURenderer, WebGL2 backend (forceWebGL)' : 'three.js WebGPURenderer' };
 }
 // B1/B2 hand three.js the snapshot's sRGB bytes as they are. With the default sRGB output they
 // would be treated as linear and brightened, so the output transfer is switched off instead of
@@ -377,7 +379,7 @@ async function main() {
   setView(params.get('view') ?? 'overview_sw');
   requestAnimationFrame(frame);
   const manifest = (await (await fetch('/manifest.json')).json()).events;
-  mark('start', { scenario, mode, renderer: webgpu ? 'webgpu' : 'webgl', upload: mode === 'b1' ? upload : undefined });
+  mark('start', { scenario, mode, renderer: webgpu ? (renderer.backend.isWebGLBackend ? 'webgpu-renderer on webgl2 (forceWebGL)' : 'webgpu') : 'webgl', upload: mode === 'b1' ? upload : undefined });
   pb.ready = true;
 
   if (scenario === 'memtest') {
@@ -442,7 +444,7 @@ async function main() {
       // WebGPU, EXT_disjoint_timer_query_webgl2 around the batch on WebGL2.
       const target = webgpu ? new THREE.RenderTarget(WIDTH, HEIGHT, { depthBuffer: true }) : null;
       const glt = webgpu ? null : glTimer(renderer.getContext());
-      pb.gpuTimer = webgpu ? 'three.js trackTimestamp (WebGPU timestamp-query), render passes of the batch' : glt ? 'EXT_disjoint_timer_query_webgl2 TIME_ELAPSED around the batch' : 'none: EXT_disjoint_timer_query_webgl2 not exposed';
+      pb.gpuTimer = webgpu ? (renderer.backend.isWebGLBackend ? 'three.js trackTimestamp on WebGL2 (EXT_disjoint_timer_query_webgl2), render passes of the batch' : 'three.js trackTimestamp (WebGPU timestamp-query), render passes of the batch') : glt ? 'EXT_disjoint_timer_query_webgl2 TIME_ELAPSED around the batch' : 'none: EXT_disjoint_timer_query_webgl2 not exposed';
       if (target) renderer.setRenderTarget(target);
       if (webgpu) await renderer.resolveTimestampsAsync('render'); // drop what earlier frames recorded
       mark('sync_start');
