@@ -25,6 +25,11 @@ const apps = () =>
 const rows = [];
 const t0 = Date.now();
 let phase = 'before';
+// Keep the display on for the whole run (decision 0040, rule C3): a display turned off by the idle
+// timeout slows the browser frame clock to ~56.6 Hz. The helper exits with this process.
+if (process.platform === 'win32') {
+  spawn('powershell', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', 'bench/keep-display.ps1', '-ParentPid', String(process.pid)], { stdio: 'ignore', detached: false });
+}
 const smi = spawn('nvidia-smi', ['--query-gpu=utilization.gpu,utilization.encoder,clocks.gr,pstate', '--format=csv,noheader,nounits', '-lms', '500'], { stdio: ['ignore', 'pipe', 'ignore'] });
 let buf = '';
 smi.stdout.on('data', (d) => {

@@ -13,11 +13,13 @@
 const params = new URLSearchParams(location.search);
 const url = params.get('ws') ?? 'ws://127.0.0.1:8720';
 const sendInputs = params.get('inputs') === '1';
-// Decision 0039: 'buffer' (default) draws one queued frame per display cycle with one frame of
-// slack, so the phase between the server tick and vsync no longer shows as empty/double cycles;
-// 'immediate' draws each frame as it is decoded (the earlier behaviour).
-const pacing = params.get('pacing') === 'immediate' ? 'immediate' : 'buffer';
+// Frame pacing (decisions 0039, 0040). 'adaptive' (default) draws one queued frame per display
+// cycle with one spare, and drops the spare once it has gone unused for TRIM_WINDOW cycles, so the
+// phase between the server tick and vsync no longer shows as empty/double cycles at little latency
+// cost; 'buffer' always keeps the spare; 'immediate' draws each frame as it is decoded.
+const pacing = ['immediate', 'buffer'].includes(params.get('pacing')) ? params.get('pacing') : 'adaptive';
 const SLACK = 2; // frames queued before drawing starts (head + one spare); more are dropped oldest-first
+const TRIM_WINDOW = 120; // cycles (2 s at 60 Hz) in a row with the spare unused before it is dropped
 const pb = (window.__pb = {
   marks: [],
   frames: [],
@@ -29,7 +31,7 @@ const pb = (window.__pb = {
   frameTimes: [],
   cycleDraws: [],
   cycles: { total: 0, missed: 0 },
-  pacing: { mode: pacing, dropped: 0 },
+  pacing: { mode: pacing, dropped: 0, trimmed: 0 },
   ready: false,
   done: false,
   view,
@@ -76,6 +78,13 @@ function codecFromSps(b) {
 
 const queue = [];
 let primed = false;
+let spareUnused = 0; // consecutive draws that found the spare already there (adaptive)
+// When a drawn frame reaches the screen: a draw inside the rAF callback shows in that rendering
+// update (its timestamp), a draw outside it in the next one. Inputs and marks drawn outside rAF
+// wait here for the next cycle's timestamp (decision 0040: input → screen, not input → draw).
+let rafT = null;
+const awaitingScreen = [];
+const onScreen = (o) => (rafT != null ? (o.screen = rafT) : awaitingScreen.push(o));
 function onFrame(frame) {
   const meta = metaByFrame.get(frame.timestamp);
   if (meta) pb.decodeMs.push(performance.now() - meta.rx);
@@ -90,6 +99,14 @@ function onFrame(frame) {
 function presentQueued() {
   if (!primed && queue.length >= SLACK) primed = true;
   if (!primed) return;
+  // Adaptive: the spare was never needed for TRIM_WINDOW draws in a row — drop the head and draw
+  // the newer frame, one cycle less waiting. It comes back by re-priming after the next dry cycle.
+  spareUnused = queue.length >= 2 ? spareUnused + 1 : 0;
+  if (pacing === 'adaptive' && spareUnused >= TRIM_WINDOW) {
+    queue.shift().frame.close();
+    pb.pacing.trimmed++;
+    spareUnused = 0;
+  }
   const next = queue.shift();
   // Ran dry: wait for the spare again so one late arrival does not leave an empty cycle.
   if (!next) return void (primed = false);
@@ -101,7 +118,7 @@ function present(frame, meta) {
   const t = performance.now();
   drawnSinceCycle = true;
   drawnThisCycle++;
-  if (meta) pb.frameTimes.push([meta.t_ms, meta.rx, t]);
+  if (meta) pb.frameTimes.push([meta.t_ms, meta.rx, t, meta.size]);
   if (!meta) return;
   // Frame-drop window (P3.4, supervisor decision): from the first drawn frame to the end of the
   // orbit — the server marks frames after it as phase "done".
@@ -114,8 +131,16 @@ function present(frame, meta) {
     mark('orbit_end', { frame: meta.frame });
   }
   // A snapshot is presented when the first frame that shows it is drawn.
-  for (const seq of meta.visible) mark('presented', { seq, frame: meta.frame });
-  for (const inp of pb.inputs) if (inp.shown == null && inp.id <= meta.input) inp.shown = t;
+  for (const seq of meta.visible) {
+    mark('presented', { seq, frame: meta.frame });
+    onScreen(pb.marks[pb.marks.length - 1]);
+  }
+  for (const inp of pb.inputs) {
+    if (inp.shown == null && inp.id <= meta.input) {
+      inp.shown = t;
+      onScreen(inp);
+    }
+  }
   drawnCount++;
   for (const w of viewWaiters.splice(0)) {
     if (meta.input >= w.id) {
@@ -145,12 +170,14 @@ function onMessage(ev) {
     mark('first_frame_received', { frame: meta.frame });
   }
   meta.rx = performance.now();
+  meta.size = ev.data.byteLength;
   metaByFrame.set(meta.frame, meta);
   decoder.decode(new EncodedVideoChunk({ type: meta.idr ? 'key' : 'delta', timestamp: meta.frame, data: au }));
 }
 
 function cycle(t) {
   pb.frames.push(t);
+  for (const o of awaitingScreen.splice(0)) o.screen = t;
   if (streaming) {
     pb.cycles.total++;
     if (!drawnSinceCycle) pb.cycles.missed++;
@@ -158,7 +185,9 @@ function cycle(t) {
   }
   drawnSinceCycle = false;
   drawnThisCycle = 0;
-  if (pacing === 'buffer') presentQueued();
+  rafT = t;
+  if (pacing !== 'immediate') presentQueued();
+  rafT = null;
   requestAnimationFrame(cycle);
 }
 

@@ -43,5 +43,6 @@
 | [0037](0037-video-browser-client.md) | 서버 영상 브라우저 클라이언트(WebCodecs), 디코더 지연 수정(VUI bitstream_restriction) | 승인 |
 | [0038](0038-p34-measurement-rules.md) | P3.4 측정 정의와 유효성 규칙(GPU 기록, 오염 기준) | 승인 |
 | [0039](0039-video-frame-pacing.md) | 서버 영상 프레임 고르게 하기: 클라이언트 한 프레임 버퍼(`?pacing=`) | 승인(조건부) |
+| [0040](0040-frame-clock-screen-latency-adaptive-pacing.md) | 측정 화면 시계(C3)·화면 기준 지연·적응형 프레임 다듬기(기본값) | 감독 검토 대기 |
 
 "제안" 상태는 작업자가 제안한 것이다. 감독 검토 또는 소유자 확인 뒤 "승인" 이 된다.

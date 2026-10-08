@@ -27,7 +27,7 @@ for (const file of process.argv.slice(2)) {
   const rx = diffs(frames.map((x) => x[1]));
   const drawn = diffs(frames.map((x) => x[2]));
   const totalDrawn = draws.reduce((a, b) => a + b, 0);
-  const pacing = r.pacing ? `, pacing ${r.pacing.mode} (dropped ${r.pacing.dropped})` : '';
+  const pacing = r.pacing ? `, pacing ${r.pacing.mode} (dropped ${r.pacing.dropped}, trimmed ${r.pacing.trimmed ?? 0})` : '';
   console.log(`== ${file}`);
   console.log(`cycles ${n}: empty ${empty} (${f((100 * empty) / n)} %), double ${doubles}, frames drawn ${totalDrawn} (${f(totalDrawn / n)} per cycle)${pacing}`);
   console.log(`empty cycles followed by a double: ${madeUp} of ${empty} (${f((100 * madeUp) / Math.max(empty, 1))} %)`);
