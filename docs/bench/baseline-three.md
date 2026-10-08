@@ -103,7 +103,7 @@
 - **GPU 프로세스 private bytes**(`mem_gpu_process_private_max`, cold 308 MB · replay 511 MB)는 GPU 메모리(VRAM)가 아니다. 드라이버·ANGLE 의 스테이징 버퍼와 공유 메모리가 들어 있다.
   vsync 를 끈 첫 측정에서는 큐가 쌓여 2.47 GB 까지 올랐다(결정 0021). VRAM 비교는 `mem_gpu`(추정) 로 한다.
 - `mem_js_heap_max` 는 typed array·ArrayBuffer 를 세지 않는 보조 지표다(결정 0020). 비교에는 `mem_cpu` 를 쓴다.
-- first_frame 은 탐색 시작 기준이라 페이지·모듈 로드(three.js 약 1.2 MB)가 섞여 실행마다 흔들린다(cold 961~1,041 ms). 데이터 비용 비교는 event_latency 로 한다.
+- first_frame 은 탐색 시작 기준이라 페이지·모듈 로드(three.js 2.1 MB, gzip 0.42 MB — comparison.md)가 섞여 실행마다 흔들린다(cold 961~1,041 ms). 데이터 비용 비교는 event_latency 로 한다.
 - 루프백이라 다운로드에 네트워크 지연·대역폭이 없다. 실제 망에서는 바이트 ÷ 대역폭을 더한다(100 Mbps 면 마지막 스냅샷만 5.4 s).
 
 ## 재현

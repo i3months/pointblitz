@@ -78,8 +78,11 @@ export function summarize(raw, { device, commit, target = 'three.js' }) {
   // through is caught and load stalls do not move it. A display off by the idle timeout gives ~56.6 Hz.
   // Native draws on demand, so its frame intervals are not the display clock (supervisor decision):
   // it uses the vsync-paced present probe at the end of the run (presentClock), or nothing.
-  const clockDeltas = raw.presentClock?.length
-    ? raw.presentClock.slice(1).map((t, i) => t - raw.presentClock[i])
+  // The first presents of the probe find free swapchain images and return without waiting for the
+  // display (after an idle orbit the whole first quarter read ~63 Hz), so the first 10 are left out.
+  const probe = raw.presentClock?.slice(10) ?? [];
+  const clockDeltas = probe.length > 1
+    ? probe.slice(1).map((t, i) => t - probe[i])
     : target === 'native' ? [] : deltas;
   const quarterHz = [0, 1, 2, 3].map((k) => {
     const q = clockDeltas.slice(Math.floor((k * clockDeltas.length) / 4), Math.floor(((k + 1) * clockDeltas.length) / 4)).sort((a, b) => a - b);
