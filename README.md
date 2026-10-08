@@ -46,6 +46,18 @@ from 150 k to 2.5 M points (67.5 MB) over 14 snapshots, 530 MB in total.
 Preview snapshots only add points; refined snapshots recompute the whole cloud.
 PointBlitz appends what is new, swaps whole generations without a blank frame, and never parses on the main thread.
 
+## Install
+
+PointBlitz 0.1.0 is on [crates.io](https://crates.io/crates/pointblitz) (Rust 1.99 or newer).
+
+```sh
+cargo add pointblitz                 # library: render core + PLY / chunk format (pointblitz-core, pointblitz-io)
+cargo install pointblitz-native      # window viewer that follows a replay server
+cargo install pointblitz-server      # headless render + hardware video (needs an NVIDIA GPU and driver, Windows or Linux)
+```
+
+The browser module is not installed from crates.io: build it from this repository with `bash web/build.sh` (below). The crate `pointblitz-web` on crates.io is its Rust source, for building your own wasm package.
+
 ## Try it
 
 PointBlitz replays a directory of skyrecon snapshot PLYs (not included in this repository) as if a flight were
@@ -114,6 +126,8 @@ PointBlitz 는 Rust + wgpu 로 만드는 점군 렌더러입니다. 같은 렌�
 - WebGL2 는 cold 에서 메인 스레드를 한 번 막습니다(목표: 0 회).
 - 서버 영상은 모든 목표를 지키지만, 회전 5 회 중 2 회는 화면 주기의 1 % 넘게 빈 주기가 생겼습니다(최대 6.32 %, 중앙값 0.40 %). 서버는 정확히 60 Hz, 화면은 60 Hz 보다 조금 느려 위상이 화면 갱신 경계를 지나가기 때문이며, 프레임이 사라지지는 않습니다.
 - 다른 하드웨어 값은 실측이 아니라 비용 모델로 추정합니다(두 번째 장비 보정 대기).
+
+설치: `cargo add pointblitz`(라이브러리), `cargo install pointblitz-native`(창 뷰어), `cargo install pointblitz-server`(서버 영상, NVIDIA GPU·드라이버 필요, Windows·Linux) — crates.io 0.1.0, Rust 1.99 이상. 브라우저 모듈은 crates.io 가 아니라 저장소에서 `bash web/build.sh` 로 빌드합니다.
 
 직접 돌려 보려면 위 [Try it](#try-it) 를 보세요 — 재생 서버를 띄운 뒤 브라우저·native·서버 영상 중 하나로 봅니다(드래그 회전, 휠 확대, 1–8 고정 시점). 서버 영상은 Windows 또는 Linux + NVIDIA GPU(드라이버의 NVENC)가 필요하고, `--phase-lock on` 은 클라이언트 하나·60 Hz 화면에서만 맞으며(기본 끔), 영상 페이지의 `?pacing=adaptive` 는 한 프레임을 쌓아 두어 프레임 간격을 고르게 합니다(지연 최대 한 프레임) — 60 Hz 가 아닌 화면을 위한 것이지만 그런 화면에서는 재 보지 않았습니다.
 
