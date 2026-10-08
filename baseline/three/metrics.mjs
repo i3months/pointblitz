@@ -83,7 +83,15 @@ export function summarize(raw, { device, commit, target = 'three.js' }) {
     : target === 'native' ? [] : deltas;
   const quarterHz = [0, 1, 2, 3].map((k) => {
     const q = clockDeltas.slice(Math.floor((k * clockDeltas.length) / 4), Math.floor(((k + 1) * clockDeltas.length) / 4)).sort((a, b) => a - b);
-    return q.length ? 1000 / percentile(q, 0.5) : NaN;
+    if (!q.length) return NaN;
+    if (!raw.presentClock?.length) return 1000 / percentile(q, 0.5);
+    // Native present times are exact (not rounded like rAF): span ÷ display periods spanned, each
+    // interval counted as its rounded number of periods (a missed vsync is two). Jitter of a present
+    // then only matters at the two ends, unlike a median of 60 jittery intervals (±0.3 Hz, P4.6).
+    const seg = clockDeltas.slice(Math.floor((k * clockDeltas.length) / 4), Math.floor(((k + 1) * clockDeltas.length) / 4));
+    const nominal = percentile(q, 0.5);
+    const periods = seg.reduce((n, d) => n + Math.max(1, Math.round(d / nominal)), 0);
+    return 1000 / (seg.reduce((a, b) => a + b, 0) / periods);
   }).filter(Number.isFinite);
   deltas.sort((a, b) => a - b);
   for (const q of [0.5, 0.95, 0.99]) {
