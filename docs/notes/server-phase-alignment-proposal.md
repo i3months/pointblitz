@@ -1,7 +1,7 @@
 # 서버 영상: 서버 틱을 클라이언트 화면 위상에 맞추기(C) — 제품 개선 제안
 
 - 날짜: 2026-10-08
-- 상태: 제안(감독이 정함). 결정 0039 의 감독 조건 ⑤ — adaptive 가 C1–C4 재측정에서 수용 기준을 못 맞춰(replay 입력 → 표시 45.1 > 40 ms) 기본값이 immediate 로 돌아갔고, C 를 다시 본다.
+- 상태: **감독 결정 — C 를 한다**(PR #41 검토, 2026-10-08; 수용 기준은 docs/ops/reviews/pr-41.md). 이전 상태: 제안(감독이 정함). 결정 0039 의 감독 조건 ⑤ — adaptive 가 C1–C4 재측정에서 수용 기준을 못 맞춰(replay 입력 → 표시 45.1 > 40 ms) 기본값이 immediate 로 돌아갔고, C 를 다시 본다.
 - 근거: docs/bench/diagnostics.md P4.3, docs/bench/server-video.md §2.3, docs/notes/frame-pacing-proposal.md
 
 ## 문제(다시)
