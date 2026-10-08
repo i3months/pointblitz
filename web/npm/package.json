@@ -1,0 +1,16 @@
+{
+  "name": "pointblitz-web",
+  "version": "0.0.0",
+  "private": true,
+  "description": "PointBlitz browser renderer: point clouds on WebGPU (WebGL2 fallback), one Rust/wgpu core compiled to wasm.",
+  "license": "MIT OR Apache-2.0",
+  "repository": { "type": "git", "url": "https://github.com/i3months/pointblitz" },
+  "type": "module",
+  "exports": {
+    ".": "./index.js",
+    "./webgpu": "./webgpu.js",
+    "./chunks": "./chunks.js"
+  },
+  "files": ["index.js", "webgpu.js", "chunks.js", "pkg/", "pkg-webgpu/", "README.md", "LICENSE-MIT", "LICENSE-APACHE"],
+  "sideEffects": false
+}

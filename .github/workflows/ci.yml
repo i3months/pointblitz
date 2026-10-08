@@ -42,8 +42,13 @@ jobs:
       - name: wasm-bindgen CLI (must equal the crate version)
         run: cargo install wasm-bindgen-cli --version 0.2.129 --locked
       - name: build
-        run: bash web/build.sh
+        run: bash web/build.sh && bash web/build.sh webgpu
       - name: size
-        run: wc -c web/pkg/*
+        # Public module sizes come from here (PR #21): raw and gzip -9 (transfer) for both modules,
+        # default (WebGPU + WebGL2 fallback) and WebGPU-only (decision 0033).
+        run: |
+          for f in web/pkg/*.wasm web/pkg/*.js web/pkg-webgpu/*.wasm web/pkg-webgpu/*.js; do
+            printf '%s raw %s gzip %s\n' "$f" "$(wc -c < "$f")" "$(gzip -9 -c "$f" | wc -c)"
+          done
       - name: browser client unit tests (node --test)
         run: node --test web/chunks.test.mjs

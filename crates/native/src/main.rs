@@ -490,7 +490,7 @@ impl App {
     }
 
     /// Display clock for rule C3 (decision 0040): with vsync (FIFO) the swapchain acquire waits for
-    /// the display, so the times at which 120 back-to-back acquires return are paced by it. Run at
+    /// the display, so the times at which 240 back-to-back acquires return are paced by it. Run at
     /// the end, after everything measured. Empty without vsync (the acquire is not paced then).
     fn clock_probe(&mut self) -> Vec<f64> {
         let Some(gpu) = &mut self.gpu else {
@@ -499,8 +499,8 @@ impl App {
         if !self.args.vsync {
             return Vec::new();
         }
-        let mut times = Vec::with_capacity(120);
-        for _ in 0..120 {
+        let mut times = Vec::with_capacity(240);
+        for _ in 0..240 {
             let tex = match gpu.surface.get_current_texture() {
                 wgpu::CurrentSurfaceTexture::Success(t)
                 | wgpu::CurrentSurfaceTexture::Suboptimal(t) => t,
