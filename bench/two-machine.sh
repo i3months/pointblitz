@@ -26,8 +26,9 @@ cargo build --release -q -p pointblitz-bench -p pointblitz-server
 {
   date -u +%FT%TZ
   nvidia-smi --query-gpu=name,driver_version,memory.total,clocks.max.graphics --format=csv,noheader
-  if [ -r /proc/cpuinfo ]; then grep -m1 "model name" /proc/cpuinfo; nproc; uptime; cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor 2>/dev/null || true; fi
-  [ -n "${PROCESSOR_IDENTIFIER:-}" ] && echo "$PROCESSOR_IDENTIFIER"
+  # Environment record only: tools missing on a platform (uptime on Git Bash) must not stop the run.
+  if [ -r /proc/cpuinfo ]; then grep -m1 "model name" /proc/cpuinfo || true; nproc || true; uptime 2>/dev/null || true; cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor 2>/dev/null || true; fi
+  if [ -n "${PROCESSOR_IDENTIFIER:-}" ]; then echo "$PROCESSOR_IDENTIFIER"; fi
   uname -a
 } > "$OUT/env.txt" 2>&1
 
