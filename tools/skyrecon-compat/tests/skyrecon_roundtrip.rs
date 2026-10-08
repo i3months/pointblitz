@@ -1,6 +1,7 @@
 //! Compatibility with skyrecon's own PLY writer (decision 0014, decision 0023).
 //!
-//! skyrecon-core is a dev-dependency pinned to a revision: this test writes clouds with
+//! Lives outside the workspace (tools/skyrecon-compat, decision 0046): skyrecon-core is a git
+//! dependency pinned to a revision that is not publicly reachable. This test writes clouds with
 //! `skyrecon_core::io::write_ply` in every layout and reads them back with PointBlitz's parsers.
 
 use pointblitz_io::{PlyStream, parse_header, points};

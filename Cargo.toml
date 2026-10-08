@@ -1,5 +1,7 @@
 [workspace]
 resolver = "3"
+# Not a member: needs a git dependency that is not publicly reachable (decision 0046).
+exclude = ["tools/skyrecon-compat"]
 members = [
     "crates/io",
     "crates/core",
