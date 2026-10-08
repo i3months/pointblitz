@@ -79,7 +79,7 @@ target/release/pointblitz-bench replay --data <ply dir> --web . --port 8700
 | server video | `target/release/pointblitz-server serve --replay http://127.0.0.1:8700 --port 8720 --wait-for-client`, then open `http://127.0.0.1:8700/static/web/video.html` | Windows or Linux with an NVIDIA GPU (NVENC, from the driver) and a browser with WebCodecs |
 
 Everywhere: drag to orbit, wheel to zoom, keys 1–8 for the fixed viewpoints. `speed` is the replay speed factor
-(60 = the 34-minute flight in about 34 s).
+(60 = snapshots made 97–2,053 s into the flight, replayed from the first one in about 32.6 s).
 
 Server video options and limits (decision 0042):
 
