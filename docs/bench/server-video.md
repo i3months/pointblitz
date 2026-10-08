@@ -45,6 +45,8 @@ pointblitz-bench compare target/bench/pointblitz-native target/bench/p34/video-v
 
 ### 2.1 고친 뒤(B: 클라이언트 한 프레임 버퍼, 결정 0039) — 위 판정 행은 그대로 둔다
 
+> **C3 감사(결정 0040)**: 이 절의 14 회 중 7 회가 화면 시계 범위 밖이었다(orbit 4·5 쌍 일부 56.8–57.1 Hz, replay ×60 4 회 전부) — 디스플레이가 Windows 화면 끄기 시간으로 꺼진 뒤. 숫자는 지우지 않고 남기며, 같은 비교를 C3 를 지켜 다시 잰 값은 §2.2 다. 입력 → 표시도 그린 시각 기준이라 immediate 가 유리했다(§2.2 는 화면 기준).
+
 같은 세션(2026-10-08 13:15–13:21), buffer / immediate 번갈아 orbit 5 회씩 + replay ×60 2 회씩, `gpu-watch` 오염 0, 실패·재시도 0. immediate = 위 판정과 같은 동작. 값은 중앙값(괄호는 최소–최대).
 
 | 지표 | immediate | **buffer(B)** | 목표 |
@@ -62,6 +64,29 @@ pointblitz-bench compare target/bench/pointblitz-native target/bench/p34/video-v
 - **끊김은 위상과 무관하게 사라졌다**(orbit 두 장 주기 0, 남은 빈 주기 2–5 개는 시작과 버퍼가 빈 순간). immediate 는 이 세션에서 5 회 중 4 회가 1 % 를 넘었다(위상 운).
 - **대가는 orbit 에서 약 한 화면 주기(+15.8 ms p50), replay 에서 약 1.5 주기(+25 ms p50)**. replay 는 서버가 스냅샷을 바꾸는 동안 도착이 더 흔들려 큐가 두 장으로 머무는 때가 많다. replay 입력 → 표시 p50 45.1 ms 는 목표(50) 안이지만 여유가 작다.
 - orbit 5 번째 쌍은 두 방식 모두 화면 주기가 적게 셌다(720–723 대 757–764) — 이 PC 의 화면 쪽 일시 현상으로 보고, buffer 는 이때 쌓인 프레임 42 장을 버렸다(`pacing_dropped`).
+
+### 2.2 적응형 다듬기(결정 0040) — C3 준수, 화면 기준 지연
+
+같은 세션(2026-10-08 13:38–13:50), keep-display, adaptive / buffer / immediate 번갈아 orbit 5 회씩 + replay ×60 3 회씩. 24 회 모두 C1·C2·C3 통과(59.88 Hz), 실패·재실행 0. 값은 중앙값(괄호는 최소–최대). 입력 → 표시와 `event_latency` 는 화면 기준(`*_screen_*`, 결정 0040), 괄호 밖 "그린 시각" 값은 진단.
+
+| 지표 | immediate | buffer | **adaptive(기본)** | 목표 |
+|---|---|---|---|---|
+| 프레임 빠짐 orbit | 1.59 % (0.26–7.79), 3/5 회 > 1 % | 0.39 % (0.26–0.65), 0/5 | **0.40 % (0.26–0.66), 0/5** | ≤ 1 % |
+| 두 장 주기 orbit(실행별) | 2–59 | 0 | **0** | — |
+| 입력 → 표시 p50 orbit (screen) | 25.1 (16.5–33.2) ms | 38.8 (33.2–49.6) ms | **28.1 (21.9–33.0) ms** | ≤ 50 |
+| 입력 → 표시 p95 orbit (screen) | 34.3 ms | 46.4 ms | **36.0 (32.9–39.4) ms** | ≤ 80 |
+| 입력 → 표시 p50 replay ×60 (screen) | 33.0 (33.0–49.8) ms | 35.4 (33.0–49.2) ms | **33.1 (32.9–34.5) ms** | ≤ 50 |
+| 입력 → 표시 p95 replay ×60 (screen) | 40.3 ms | 39.8 ms | **38.4 (35.9–49.5) ms** | ≤ 80 |
+| (진단) 입력 → 표시 p50 orbit, 그린 시각 | 18.4 ms | 39.1 ms | 28.5 ms | — |
+| `event_latency` preview p50 ×60 (screen) | 25.6 ms (그린 시각 12.8) | 28.8 ms | **30.4 (22.6–31.5) ms** | ≤ 80 |
+| `event_latency` refined p50 ×60 (screen) | 107.5 ms | 152.8 ms | **150.1 (114.2–152.4) ms** | ≤ 250 |
+| 프레임 빠짐 replay ×60(보고만) | 2.93 % (2.51–16.73) | 1.37 % | 1.42 % (1.37–1.47) | — |
+
+- **0039 수용 기준(감독) 통과**: adaptive 의 입력 → 표시 p50(screen)이 immediate 대비 orbit +3.0 ms, replay +0.1 ms(기준 +16.7 ms 이하), 둘 다 40 ms 이하, orbit 빠짐은 모든 실행 ≤ 1 %(최대 0.66 %). 그래서 기본값을 adaptive 로 바꿨다(`?pacing=buffer|immediate` 는 선택지).
+- 화면 기준으로 보면 immediate 의 이점은 그린 시각 기준(18.4 ms)보다 작다(25.1 ms) — rAF 밖에서 그린 프레임은 다음 렌더링 갱신에 화면에 나온다.
+- 대가: refined 반영(`event_latency` refined)이 adaptive·buffer 에서 immediate 보다 약 40 ms 길다(목표 250 안). 스냅샷 교체 때 서버 렌더가 늦어 큐가 비면 여유분을 다시 모으느라 기다리는 것으로 본다. 원인 분리는 하지 않았다.
+- replay 는 세 방식 모두 1 % 를 넘는다(보고만 — 판정 대상은 orbit). 스냅샷 교체 때 서버 프레임이 늦는 것이 남는다.
+- 스냅샷 교체 프레임(그 스냅샷을 처음 보여 주는 프레임) 크기: 41 개 p50 13.9 KiB, 최대 171.0 KiB. 정지 프레임 p50 0.2 KiB, p95 3.6 KiB(immediate replay raw, `bench/video/frame-bytes.mjs`).
 
 ## 3. 같은 세션 전체 비교 (중앙값)
 
