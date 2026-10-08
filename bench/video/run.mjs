@@ -3,7 +3,7 @@
 // usage: node bench/video/run.mjs --server http://127.0.0.1:<replay> --port <serve port>
 //                                 --scenario replay|cold|orbit [--speed 60] [--metrics <file.jsonl>]
 //                                 [--exe target/release/pointblitz-server.exe] [--log <server log>]
-//                                 [--raw <file.json>] [--pacing buffer|immediate (decision 0039)]
+//                                 [--raw <file.json>] [--pacing buffer|immediate|adaptive (decisions 0039, 0040)]
 //                                 [--timeout <s, default 300: fail a client that never finishes>]
 // Run from the repository root (serve reads bench/viewpoints/flight-01.json).
 //
@@ -52,7 +52,7 @@ await new Promise((r) => setTimeout(r, 1500)); // let it bind and open the encod
 
 const client = spawn(process.execPath, ['run.mjs', '--server', server, '--target', 'video',
   '--query', `ws=ws://127.0.0.1:${port}&inputs=1${args.pacing ? `&pacing=${args.pacing}` : ''}`, '--scenario', scenario, '--speed', String(speed),
-  '--metrics', path.resolve(metrics), ...(args.raw ? ['--raw', path.resolve(args.raw)] : []), '--timeout', String(args.timeout ?? 300)], { cwd: 'baseline/three', stdio: ['ignore', 'ignore', 'inherit'] });
+  '--metrics', path.resolve(metrics), ...(args.raw ? ['--raw', path.resolve(args.raw)] : []), '--timeout', String(args.timeout ?? 300), ...(args.headed ? ['--headed'] : [])], { cwd: 'baseline/three', stdio: ['ignore', 'ignore', 'inherit'] });
 const clientCode = await new Promise((resolve) => client.on('exit', resolve));
 // A failed client never closes the session the server waits on; stop our own child instead of hanging.
 if (clientCode !== 0) serve.kill();

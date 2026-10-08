@@ -34,6 +34,7 @@ export function summarize(raw, { device, commit, target = 'three.js' }) {
 
   // Per-event latency: snapshot announced → first frame that shows it.
   const latency = { preview: [], refined: [] };
+  const screenLatency = { preview: [], refined: [] };
   const stage = { fetch: [], parse: [] };
   for (const r of by('snapshot_received')) {
     const presented = by('presented').find((m) => m.seq === r.seq);
@@ -41,6 +42,7 @@ export function summarize(raw, { device, commit, target = 'three.js' }) {
     const p = by('parse_end').find((m) => m.seq === r.seq);
     if (!presented) continue;
     latency[r.kind ?? 'refined'].push(presented.t - r.t);
+    if (presented.screen != null) screenLatency[r.kind ?? 'refined'].push(presented.screen - r.t);
     if (f && p) {
       stage.fetch.push(f.t - by('fetch_start').find((m) => m.seq === r.seq).t);
       stage.parse.push(p.t - f.t);
@@ -53,6 +55,8 @@ export function summarize(raw, { device, commit, target = 'three.js' }) {
       out.push(rec(`event_latency_${kind}_p50`, percentile(s, 0.5), 'ms', s.length));
       out.push(rec(`event_latency_${kind}_max`, s[s.length - 1], 'ms', s.length));
     }
+    const v = screenLatency[kind].sort((a, b) => a - b);
+    if (v.length) out.push(rec(`event_screen_latency_${kind}_p50`, percentile(v, 0.5), 'ms', v.length));
   }
 
   // First frame with points, measured from navigation start (performance.now origin).
@@ -69,12 +73,31 @@ export function summarize(raw, { device, commit, target = 'three.js' }) {
     if (syncSpans.some(([s, e]) => a < e && b > s)) continue;
     deltas.push(b - a);
   }
+  // The frame clock the run actually had (rule C3, decision 0040): 1000 / median interval of each
+  // time-ordered quarter, keeping the one farthest from 60 Hz, so a clock that changes part-way
+  // through is caught and load stalls do not move it. A display off by the idle timeout gives ~56.6 Hz.
+  // Native draws on demand, so its frame intervals are not the display clock (supervisor decision):
+  // it uses the vsync-paced present probe at the end of the run (presentClock), or nothing.
+  const clockDeltas = raw.presentClock?.length
+    ? raw.presentClock.slice(1).map((t, i) => t - raw.presentClock[i])
+    : target === 'native' ? [] : deltas;
+  const quarterHz = [0, 1, 2, 3].map((k) => {
+    const q = clockDeltas.slice(Math.floor((k * clockDeltas.length) / 4), Math.floor(((k + 1) * clockDeltas.length) / 4)).sort((a, b) => a - b);
+    return q.length ? 1000 / percentile(q, 0.5) : NaN;
+  }).filter(Number.isFinite);
   deltas.sort((a, b) => a - b);
   for (const q of [0.5, 0.95, 0.99]) {
     out.push(rec(`frame_interval_p${Math.round(q * 100)}`, percentile(deltas, q), 'ms', deltas.length));
   }
   if (deltas.length) {
     out.push(rec('frame_interval_max', deltas[deltas.length - 1], 'ms', deltas.length));
+  }
+  if (quarterHz.length) {
+    const worst = quarterHz.reduce((a, b) => (Math.abs(b - 60) > Math.abs(a - 60) ? b : a));
+    out.push(rec('display_hz', worst, 'Hz', clockDeltas.length, {
+      quarters: quarterHz.map((x) => +x.toFixed(2)),
+      method: raw.presentClock?.length ? 'vsync present probe' : 'rAF',
+    }));
   }
 
   // SPEC §6.2 frame_time (CPU and GPU separately) = synchronised frames at each fixed viewpoint
@@ -106,6 +129,14 @@ export function summarize(raw, { device, commit, target = 'three.js' }) {
     out.push(rec('input_latency_p95', percentile(s, 0.95), 'ms', s.length));
     out.push(rec('input_latency_max', s[s.length - 1], 'ms', s.length));
     out.push(rec('input_unanswered', raw.inputs.length - inputs.length, 'count', raw.inputs.length));
+    // Decision 0040: to the rendering update that shows the frame (a draw outside rAF shows one
+    // update later), so pacing modes that draw at different points in the cycle compare fairly.
+    const screen = raw.inputs.filter((i) => i.screen != null).map((i) => i.screen - i.sent).sort((a, b) => a - b);
+    if (screen.length) {
+      out.push(rec('input_screen_latency_p50', percentile(screen, 0.5), 'ms', screen.length));
+      out.push(rec('input_screen_latency_p95', percentile(screen, 0.95), 'ms', screen.length));
+      out.push(rec('input_screen_latency_max', screen[screen.length - 1], 'ms', screen.length));
+    }
   }
   if (raw.decodeMs?.length) {
     const s = [...raw.decodeMs].sort((a, b) => a - b);
