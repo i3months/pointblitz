@@ -18,7 +18,7 @@ mod encode_test;
 
 fn main() -> std::process::ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let result = match args.first().map(String::as_str) {
+    let result: Result<(), String> = match args.first().map(String::as_str) {
         #[cfg(windows)]
         Some("encode-test") => encode_test::run(&args[1..]),
         #[cfg(not(windows))]
