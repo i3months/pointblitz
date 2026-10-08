@@ -11,7 +11,7 @@
 ## 선택지와 결정
 | 항목 | 선택지 | 고른 것 | 이유 |
 |---|---|---|---|
-| 재생 따라가기 | 서버 전용 구현 / **native 와 같은 클라이언트** | 같은 것: `pointblitz-native` 의 `net.rs` 를 `pointblitz-io::client` 로 옮김(wasm 제외, `serde_json` 은 wasm 이 아닐 때만) | 전달 경로(전체·차분, 결정 0026)와 시각 기록을 두 대상이 똑같이 쓴다. 중복 코드 없음 |
+| 재생 따라가기 | 서버 전용 구현 / **native 와 같은 클라이언트** | 같은 것: `pointblitz-native` 의 `net.rs` 를 `pointblitz-io::client` 로 옮김. **기본 꺼진 cargo 기능 `client` 뒤에** 두고(`serde_json` 도 그 기능에만), native·server 만 켠다 — core 는 io 에 의존하므로 기본으로 들어가면 core 의 트리에 네트워크 코드가 들어온다(SPEC §3.1, 결정 0003, PR #26 검토 H1). `scripts/check.sh` 가 `cargo tree -p pointblitz-core` 에 serde_json·tungstenite·winit·wasm-bindgen 이 없는지 확인한다 | 전달 경로(전체·차분, 결정 0026)와 시각 기록을 두 대상이 똑같이 쓴다. 중복 코드 없음 |
 | 프레임 주기 | 바뀔 때만 / **고정 60 fps** | 고정 | 영상은 화면 주기마다 새 프레임이 와야 "프레임 빠짐"(SPEC §7.1)을 정의할 수 있다. 바뀐 것이 없으면 P 프레임이 수십 바이트라 비용이 작다. 늦은 틱은 몰아서 따라잡지 않는다 |
 | 렌더 → 인코더 | — | `Headless::capture`(렌더 + 읽기) → `Encoder::encode` | P3.1 그대로. 공유 메모리 경로는 P3.4 에서 복사가 크면(결정 0035) |
 | WebSocket | 손으로 구현 / **`tungstenite` 0.30(MIT OR Apache-2.0, `handshake` 기능만)** | tungstenite | 동기 API 라 std 스레드 구조와 맞고, 프레이밍·핸드셰이크를 직접 쓰지 않는다. 127.0.0.1 에만 묶는다(재생 서버와 같음) |

@@ -30,6 +30,12 @@ step "clippy (wasm32: web default, web WebGPU-only)"
 cargo clippy -p pointblitz-web --target wasm32-unknown-unknown -- -D warnings
 cargo clippy -p pointblitz-web --target wasm32-unknown-unknown --no-default-features -- -D warnings
 
+step "crate boundaries (SPEC §3.1): the core has no network or JSON dependency"
+if cargo tree -q -p pointblitz-core -e normal --prefix none | grep -E "^(serde_json|tungstenite|winit|wasm-bindgen) "; then
+  echo "error: pointblitz-core depends on the above (SPEC §3.1, decision 0003)" >&2
+  exit 1
+fi
+
 step test
 cargo test --workspace
 
