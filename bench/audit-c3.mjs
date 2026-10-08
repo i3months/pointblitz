@@ -14,7 +14,7 @@ const C3_HZ = [59.5, 60.5];
 const read = (f) => fs.readFileSync(f, 'utf8').trim().split('\n').filter(Boolean).map((l) => JSON.parse(l));
 
 for (const dir of process.argv.slice(2)) {
-  const runs = fs.readdirSync(dir).filter((f) => f.endsWith('.jsonl')).map((f) => f.slice(0, -'.jsonl'.length)).sort();
+  const runs = fs.readdirSync(dir).filter((f) => f.endsWith('.jsonl') && !/\.try\d+-/.test(f)).map((f) => f.slice(0, -'.jsonl'.length)).sort();
   const rows = [];
   for (const run of runs) {
     const recs = read(path.join(dir, `${run}.jsonl`));

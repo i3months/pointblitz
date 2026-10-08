@@ -15,7 +15,8 @@ const dir = process.argv[2];
 const args = parseArgs(process.argv.slice(3));
 const records = fs
   .readdirSync(dir)
-  .filter((f) => f.endsWith('.jsonl'))
+  // <run>.tryN-failed|invalid.jsonl: a first attempt the suite redid (kept for the record, not counted).
+  .filter((f) => f.endsWith('.jsonl') && !/\.try\d+-/.test(f))
   .flatMap((f) =>
     fs
       .readFileSync(path.join(dir, f), 'utf8')
