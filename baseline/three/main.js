@@ -24,6 +24,7 @@ const params = new URLSearchParams(location.search);
 const scenario = params.get('scenario') ?? 'replay';
 const speed = Number(params.get('speed') ?? 60);
 const framesPerView = Number(params.get('frames') ?? 120);
+const batch = Math.max(1, Number(params.get('batch') ?? 1));
 
 const pb = (window.__pb = { marks: [], frames: [], longtasks: [], syncFrames: [], ready: false, done: false, setView });
 // Main-thread blocks over 50 ms (SPEC §6.2 main_thread_block).
@@ -194,13 +195,15 @@ async function main() {
       mark('sync_start');
       for (const v of viewpoints) {
         setView(v.name);
-        for (let k = 0; k < framesPerView; k++) {
+        // batch=N (P4.1 diagnosis): N frames back to back, one sync, per-frame averages — the
+        // sync's own cost is spread over N frames, so implementations compare without it.
+        for (let k = 0; k < framesPerView; k += batch) {
           const t0 = performance.now();
-          renderer.render(scene, camera);
+          for (let j = 0; j < batch; j++) renderer.render(scene, camera);
           const t1 = performance.now();
           gl.readPixels(0, 0, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, syncPixel);
           const t2 = performance.now();
-          pb.syncFrames.push({ view: v.name, cpu: t1 - t0, ms: t2 - t0 });
+          pb.syncFrames.push({ view: v.name, cpu: (t1 - t0) / batch, ms: (t2 - t0) / batch, batch });
         }
       }
       mark('sync_end');

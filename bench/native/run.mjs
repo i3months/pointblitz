@@ -27,6 +27,7 @@ const marksPath = path.join(os.tmpdir(), `pb-native-marks-${process.pid}-${Date.
 const cli = ['--server', server, '--scenario', scenario, '--speed', String(speed), '--marks', marksPath, '--exit-on-end', '--wait-before-exit'];
 if (args['no-vsync']) cli.push('--no-vsync');
 if (args.continuous) cli.push('--continuous');
+if (args.batch) cli.push('--batch', String(args.batch));
 if (args['memory-hints']) cli.push('--memory-hints', args['memory-hints']);
 
 const t0 = Date.now();

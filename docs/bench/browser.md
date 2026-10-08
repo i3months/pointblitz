@@ -74,6 +74,9 @@ preview 446.9 / refined 621.7 / cold 950.4 ms, `main_thread_block` replay ×60 1
 ## 3. 미달 항목 분석
 
 ### `frame_time_total` (browser 세 가지 모두)
+
+> **P4.1 진단으로 확인(2026-10-08, [diagnostics.md](diagnostics.md))**: 동기화를 30 프레임에 한 번으로 나누면 WebGPU 는 프레임당 1.43 ms 로 native(1.37)와 같다 — 아래 WebGPU 원인 설명이 맞다. WebGL2 는 비용이 CPU 쪽 `render_offscreen` 호출 안에 있다(동기화와 무관). 판정(미달)은 그대로다.
+
 - 같은 장면을 같은 core 가 그린다. native 는 1.55 ms 이고 GPU 는 같으므로 차이는 **브라우저에서 "GPU 가 끝났다" 를 아는 비용**이 크다.
   - WebGPU 에는 막는 읽기가 없어 1 픽셀 복사 + `mapAsync` 를 기다린다. GPU 프로세스와의 왕복과 Promise 처리가 매 프레임 들어간다(cpu 쪽 호출은 p50 0.1 ms).
   - 기준 방식의 `readPixels` 도 왕복이지만 동기라 더 짧다.
