@@ -76,6 +76,7 @@ add('mem_server_peak', peak, 'B', { method: 'OS peak commit of the server proces
 if (summary) {
   add('server_frames', summary.frames, 'count');
   add('server_late_ticks_pct', (100 * summary.over_budget_ticks) / summary.frames, '%');
+  add('server_fps', Number(args.fps ?? 60), 'fps'); // decision 0045: late ticks above 60 fps are a result, not contamination
   for (const k of ['render', 'encode']) for (const q of ['p50', 'p95', 'p99']) add(`server_${k}_ms_${q}`, summary[`${k}_ms_${q}`], 'ms');
 }
 fs.writeFileSync(metrics, records.map((r) => JSON.stringify(r)).join('\n') + '\n');

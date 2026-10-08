@@ -29,7 +29,11 @@ const cal = fs.existsSync(cpuFile)
   : undefined;
 if (!(cal >= 0.9 * ref)) why.push(`C4 cpu ${cal ?? 'no calibration'}`);
 const late = top('server_late_ticks_pct');
-if (late > 1) why.push(`C4 late ticks ${late.toFixed(2)} %`);
+// Above 60 fps the late-tick share is that mode's result (8.3 ms budget at 120 fps), reported but not
+// used to invalidate (decision 0045); the CPU calibration still applies.
+const fps = top('server_fps') ?? 60;
+const note = fps > 60 && late > 1 ? `; late ticks ${late.toFixed(2)} % at ${fps} fps (reported, decision 0045)` : '';
+if (late > 1 && fps <= 60) why.push(`C4 late ticks ${late.toFixed(2)} %`);
 
-console.log(why.length ? why.join('; ') : `ok ${hz.toFixed(2)} Hz, cpu ${cal}`);
+console.log(why.length ? why.join('; ') : `ok ${hz.toFixed(2)} Hz, cpu ${cal}${note}`);
 process.exit(why.length ? 1 : 0);
