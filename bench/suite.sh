@@ -60,6 +60,7 @@ run() { # impl scenario speed index [batch]
     three-b1a) cmd=(node baseline/three/run.mjs --server "$URL" --label three-b1a --query "mode=b1&upload=a" --scenario "$scen" --speed "$speed" --metrics "$ABS_OUT/$name.jsonl") ;;
     three-b1b) cmd=(node baseline/three/run.mjs --server "$URL" --label three-b1b --query "mode=b1&upload=b" --scenario "$scen" --speed "$speed" --metrics "$ABS_OUT/$name.jsonl") ;;
     three-b1-webgpu) cmd=(node baseline/three/run.mjs --server "$URL" --label three-b1-webgpu --query "mode=b1&upload=${B1_UPLOAD:-a}&renderer=webgpu" --scenario "$scen" --speed "$speed" --metrics "$ABS_OUT/$name.jsonl") ;;
+    three-b1-forcewebgl) cmd=(node baseline/three/run.mjs --server "$URL" --label three-b1-forcewebgl --query "mode=b1&upload=${B1_UPLOAD:-a}&renderer=webgpu&forcewebgl=1" --scenario "$scen" --speed "$speed" --metrics "$ABS_OUT/$name.jsonl") ;; # diagnosis (#72): instanced quads on WebGL2
     three-b2) cmd=(node baseline/three/run.mjs --server "$URL" --label three-b2 --query "mode=b2" --scenario "$scen" --speed "$speed" --metrics "$ABS_OUT/$name.jsonl") ;;
     web) cmd=(node baseline/three/run.mjs --server "$URL" --target web --label web-webgpu --scenario "$scen" --speed "$speed" --metrics "$ABS_OUT/$name.jsonl") ;;
     webs) cmd=(node baseline/three/run.mjs --server "$URL" --target web --label web-webgpu-only --query pkg=webgpu --scenario "$scen" --speed "$speed" --metrics "$ABS_OUT/$name.jsonl") ;;
