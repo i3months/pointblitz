@@ -108,5 +108,17 @@ C2 로 뺀 실행(contaminated/): 0 회.
 4. **서버 영상 지연은 화면 기준**(결정 0040): 렌더링 갱신 시각까지. P3.4 열의 서버 영상 값은 "그린 시각" 기준이라 몇 ms 작다.
 5. **요청 때 그리기**: native·browser 는 바뀐 것이 있을 때만 그린다(P1.5). orbit 의 frame_time 은 동기화 프레임으로 잰 것이다.
 6. **native `first_frame`** 은 프로세스 시작부터(창·장치 만들기 포함), 브라우저는 탐색 시작부터다(PR #13) — 대상 사이에 직접 비교하지 않는다.
-7. **화질**: 서버 영상 고정 시점 SSIM 0.9967(대 native 캡처, 점 영역 0.9846), native 대 three.js 점 영역 0.9554 — P3.4(C4 미상, 화질은 타이밍과 무관). 공개 wasm 크기는 CI 빌드 값으로 싣는다(PR #21).
+7. **화질**: 서버 영상 고정 시점 SSIM 0.9967(대 native 캡처, 점 영역 0.9846), native 대 three.js 점 영역 0.9554 — P3.4(C4 미상, 화질은 타이밍과 무관). 공개 wasm 크기는 CI 빌드 값(아래 "브라우저 모듈 크기", PR #21).
 8. 메모리·대역폭은 목표가 아니라 기록이다(소유자 결정, INTENT 원칙 2).
+
+## 브라우저 모듈 크기 (CI 빌드, PR #21)
+
+GitHub Actions `wasm` 작업(ubuntu-latest, wasm-bindgen 0.2.129, 실행 37742566372, PR #47 커밋)의 값. gzip 은 `gzip -9`(전송 크기의 기준).
+
+| 모듈 | wasm raw | wasm gzip | JS raw | JS gzip | 합계 gzip |
+|---|---:|---:|---:|---:|---:|
+| 기본(WebGPU + WebGL2 대체, `pointblitz-web`) | 4,277,741 B | 1,206,591 B | 122,246 B | 20,032 B | **1.23 MB** |
+| WebGPU 전용(`pointblitz-web/webgpu`, 결정 0033) | 388,044 B | 96,958 B | 71,204 B | 13,974 B | **0.11 MB** |
+
+- 비교를 위해: three.js 기준 방식 페이지는 three.js 모듈 약 1.2 MB(raw)를 받는다(baseline-three.md). 
+- 모듈 크기는 한 번만 받는 비용이고, 위 판정의 `first_frame`·지연에는 루프백에서 받은 모듈 로드가 들어 있다.
