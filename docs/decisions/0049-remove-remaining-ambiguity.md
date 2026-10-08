@@ -28,6 +28,14 @@
 - 지표: 재생 미리보기 p50, 재생 정밀 p50, cold 마지막 스냅샷(지금까지와 같은 정의), 메인 스레드 멈춤 횟수(기록).
 - **판정 방법(측정 전 고정)**: 지표마다 비 = median(three.js 쪽) ÷ median(PointBlitz 쪽). 부트스트랩: 두 대상의 실행 값을 각각 복원 추출로 다시 뽑아(실행 수 그대로) 비를 10,000 번 계산, 2.5–97.5 백분위를 95 % 구간으로 한다(난수 씨앗 고정 48049). **구간이 1 을 포함하면 "차이 없음"**, 1 보다 크면 "PointBlitz 가 빠름", 작으면 "three.js 가 빠름". frame_time(batch=30)에도 같은 방법을 쓴다(회수는 계획 3).
 
+### 4. 측정 전 보충(2026-10-09, 감독 결정 — PR #69 단위 확인 뒤, 측정 전)
+- **같은 API 쌍은 같은 동기화 방법**: B1-webgpu 의 회전 동기화를 PointBlitz web 과 같게 바꾼다 — 화면 밖 렌더 타깃에 그리고 그 1 px 를 복사 + `mapAsync`(three.js `readRenderTargetPixelsAsync`). 지금까지 쓴 `onSubmittedWorkDone` 은 같은 API 인데 방법이 달라 batch=30 에서도 차이가 남을 수 있다. WebGL2 기준(B0·B1·B2)은 자기가 그린 캔버스를 `readPixels` 하므로 그대로(그 읽기는 그리기를 기다린다).
+- **GPU timestamp 를 9 대상 모두 같은 절차로 기록**한다(보조 → 판정 확인용): 회전의 batch 마다 그 batch 의 GPU 시간 ÷ batch.
+  - WebGL2 대상(B0·B1a·B1b·B2·PointBlitz webgl): 같은 GL 컨텍스트에서 `EXT_disjoint_timer_query_webgl2` 의 `TIME_ELAPSED` 를 batch 앞뒤에 건다. wgpu 의 GL 백엔드는 timestamp query 를 지원하지 않지만 GL 호출을 제출(`render_offscreen`) 안에서 바로 내보내므로 바깥 쿼리가 같은 GPU 일을 잰다. `GPU_DISJOINT` 가 서면 그 batch 는 버린다.
+  - WebGPU 대상(web·webs·B1-webgpu)과 native: 렌더 패스의 `timestampWrites`(시작·끝)로 프레임마다 재고 batch 안에서 더한다. three.js 는 `trackTimestamp` + `resolveTimestampsAsync`.
+  - Chrome 은 WebGPU timestamp 를 거칠게(약 0.1 ms 단위) 줄 수 있다 — 결과에 적는다.
+- **판정 확인 규칙**: 같은 API 쌍에서 batch=30 비와 GPU timestamp 비의 **방향이 서로 다르면**(한쪽은 1 보다 크고 다른 쪽은 작음, 또는 한쪽 구간만 1 을 포함) 그 칸은 **"판정 보류 — 원인 조사"** 로 둔다. 방향이 같으면 batch=30 이 판정값이다. 이로써 WebGL2 의 맵 완료가 화면 주기에 묶여 batch=30 에 최대 약 1.1 ms 얹히는 문제(PR #69)도 timestamp 로 드러난다.
+
 ## 대가
 - 측정이 길다(계획 3, 약 1.5 시간). 공개 문구 정정은 그 뒤 한 번에 한다.
 - batch=30 은 "한 프레임을 그려 보여 주는 데 걸리는 시간" 이 아니라 "연달아 그릴 때의 처리량" 이다. SPEC §6.2 의 frame_time(batch=1)과 다르다는 것을 표에 적는다.
