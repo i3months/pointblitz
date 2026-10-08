@@ -12,16 +12,17 @@
 //! Output per QP: `<stream>.h264` (Annex B), `<stream>.json` (per-frame bytes, IDR, upload and
 //! encode ms, sample name), and the pre-encode frames of the samples as `<stream>-src/<name>.png`.
 
-#[cfg(windows)]
+// NVENC: Windows and Linux (decisions 0035, 0043).
+#[cfg(any(windows, target_os = "linux"))]
 mod nvenc;
 
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "linux"))]
 mod encode_test;
 
-#[cfg_attr(not(windows), allow(dead_code))]
+#[cfg_attr(not(any(windows, target_os = "linux")), allow(dead_code))]
 mod phase;
 mod probe;
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "linux"))]
 mod serve;
 
 const USAGE: &str = "usage:
@@ -32,13 +33,14 @@ const USAGE: &str = "usage:
 fn main() -> std::process::ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let result: Result<(), String> = match args.first().map(String::as_str) {
-        #[cfg(windows)]
+        #[cfg(any(windows, target_os = "linux"))]
         Some("encode-test") => encode_test::run(&args[1..]),
-        #[cfg(not(windows))]
-        Some("encode-test" | "serve") => {
-            Err("NVENC encoding is implemented for Windows only (decision 0035)".into())
-        }
-        #[cfg(windows)]
+        #[cfg(not(any(windows, target_os = "linux")))]
+        Some("encode-test" | "serve") => Err(
+            "NVENC encoding is implemented for Windows and Linux only (decisions 0035, 0043)"
+                .into(),
+        ),
+        #[cfg(any(windows, target_os = "linux"))]
         Some("serve") => serve::run(&args[1..]),
         Some("probe") => probe::run(&args[1..]),
         _ => Err(USAGE.into()),
