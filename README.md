@@ -107,7 +107,7 @@ PointBlitz 는 Rust + wgpu 로 만드는 점군 렌더러입니다. 같은 렌�
 세 곳에서 돌리고, 기존 three.js 방식과 같은 데이터·같은 시점으로 성능을 비교합니다.
 문서는 [INTENT](INTENT.md) → [SPEC](SPEC.md) → [PROJECT](PROJECT.md) → [결정 기록](docs/decisions/) 순서로 보세요.
 
-**첫 결과(2026-10-08, 한 PC 같은 세션, 측정 유효성 규칙 C1–C4)** — 자세한 표·조건·각주는 [docs/bench/comparison.md](docs/bench/comparison.md).
+**첫 결과(2026-10-08, 한 PC 같은 세션, 측정 유효성 규칙 C1–C4)** — 자세한 표·조건·각주는 [docs/bench/comparison.md](docs/bench/comparison.md), 무엇이 왜 좋아졌는지는 [성능 보고서](docs/bench/report.md).
 
 - 새 데이터가 화면에 나오기까지: three.js 471 ms(preview) / 632 ms(refined) / 904 ms(cold) → PointBlitz 21–36 / 118–131 / 131–186 ms(**약 5–23 배 빠름**). 받는 데이터도 530.8 MB → 180.4 MB(브라우저·native), 10.3 MB(서버 영상).
 - **그리기 속도는 같은 수준이고 더 빠르지 않습니다.** native 의 frame_time 은 목표(기준 방식 값) 안이지만 여유가 없고, **브라우저는 목표 미달**입니다 — 매 프레임 GPU 와 동기화하는 비용 때문이며, 30 프레임마다 동기화하면(진단 값) WebGPU 1.43 ms, native 1.37 ms 입니다.
