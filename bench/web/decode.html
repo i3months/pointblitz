@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>PointBlitz decode check</title>
+<link rel="icon" href="data:,">
+<style>html, body { margin: 0; background: #000; } canvas { display: block; width: 1920px; height: 1080px; }</style>
+</head>
+<body>
+<canvas id="view" width="1920" height="1080"></canvas>
+<script type="module">
+// P3.1: decode an NVENC Annex B stream with WebCodecs, keep the sampled frames, draw on request.
+// ?h264=<url>&index=<url>  (index = the encoder's per-frame JSON: bytes, idr, sample)
+const params = new URLSearchParams(location.search);
+const pb = (window.__pb = { ready: false, error: null, samples: [], draw });
+const canvas = document.getElementById('view');
+const ctx = canvas.getContext('2d');
+const kept = new Map();
+
+/** avc1.PPCCLL from the first SPS (NAL type 7) in an Annex B buffer. */
+function codecFromSps(bytes) {
+  for (let i = 0; i + 4 < bytes.length; i++) {
+    const start3 = bytes[i] === 0 && bytes[i + 1] === 0 && bytes[i + 2] === 1;
+    if (start3 && (bytes[i + 3] & 0x1f) === 7) {
+      const hex = (b) => b.toString(16).padStart(2, '0');
+      return `avc1.${hex(bytes[i + 4])}${hex(bytes[i + 5])}${hex(bytes[i + 6])}`;
+    }
+  }
+  throw new Error('no SPS');
+}
+
+async function draw(name) {
+  ctx.drawImage(kept.get(name), 0, 0, canvas.width, canvas.height);
+}
+
+try {
+  const stream = new Uint8Array(await (await fetch(params.get('h264'))).arrayBuffer());
+  const index = await (await fetch(params.get('index'))).json();
+  const frames = index.frames;
+  let decoded = 0;
+  const decoder = new VideoDecoder({
+    output: (frame) => {
+      const f = frames[decoded++];
+      // Copy samples out and close every frame at once: holding VideoFrames starves the
+      // (hardware) decoder of output buffers and flush() never finishes.
+      if (f.sample) {
+        const copy = new OffscreenCanvas(frame.displayWidth, frame.displayHeight);
+        copy.getContext('2d').drawImage(frame, 0, 0);
+        kept.set(f.sample, copy);
+      }
+      frame.close();
+    },
+    error: (e) => (pb.error = String(e)),
+  });
+  const codec = codecFromSps(stream);
+  decoder.configure({ codec, optimizeForLatency: true, hardwareAcceleration: 'prefer-hardware' });
+  let off = 0;
+  for (const [i, f] of frames.entries()) {
+    decoder.decode(new EncodedVideoChunk({ type: f.idr ? 'key' : 'delta', timestamp: i * 16667, data: stream.subarray(off, off + f.bytes) }));
+    off += f.bytes;
+  }
+  await decoder.flush();
+  pb.codec = codec;
+  pb.decoded = decoded;
+  pb.samples = [...kept.keys()];
+} catch (e) {
+  pb.error = String(e);
+}
+pb.ready = true;
+</script>
+</body>
+</html>
