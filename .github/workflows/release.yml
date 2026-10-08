@@ -3,10 +3,19 @@ name: release
 # crates.io release (decision 0044): push a tag v<version> (for example v0.1.0) whose version equals
 # the workspace version. Needs the repository secret CARGO_REGISTRY_TOKEN (a crates.io API token
 # with publish-new and publish-update scopes), which the owner adds; nothing else holds it.
+#
+# Resumable (decision 0047): a crate whose version is already on crates.io is skipped, so a release
+# that stopped part-way (a crates.io rate limit, say) is finished by running it again — by hand
+# (workflow_dispatch) with the same tag; the tag's code is checked out, not the branch's.
 
 on:
   push:
     tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'tag to release (for example v0.1.0)'
+        required: true
 
 env:
   CARGO_TERM_COLOR: always
@@ -14,21 +23,31 @@ env:
 jobs:
   publish:
     runs-on: ubuntu-latest
+    env:
+      TAG: ${{ inputs.tag || github.ref_name }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
       - name: Install toolchain from rust-toolchain.toml
         run: rustup show active-toolchain || rustup toolchain install
       - name: tag matches the workspace version
         run: |
           v=$(grep -m1 '^version = ' Cargo.toml | sed 's/version = "\(.*\)"/\1/')
-          [ "${GITHUB_REF_NAME}" = "v$v" ] || { echo "tag ${GITHUB_REF_NAME} != workspace version v$v"; exit 1; }
+          [ "$TAG" = "v$v" ] || { echo "tag $TAG != workspace version v$v"; exit 1; }
       - name: fmt
         run: cargo fmt --all --check
       - name: clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
       - name: test
         run: cargo test --workspace
-      - name: publish (cargo orders the crates by their dependencies)
+      - name: publish, skipping versions already on crates.io (dependency order)
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-        run: cargo publish --workspace --exclude pointblitz-bench
+        run: |
+          v=${TAG#v}
+          for c in pointblitz-io pointblitz-core pointblitz pointblitz-native pointblitz-server pointblitz-web; do
+            code=$(curl -s -o /dev/null -w '%{http_code}' -A 'pointblitz-release (github.com/i3months/pointblitz)' "https://crates.io/api/v1/crates/$c/$v")
+            if [ "$code" = 200 ]; then echo "$c $v is already on crates.io, skipped"; continue; fi
+            cargo publish -p "$c"
+          done
