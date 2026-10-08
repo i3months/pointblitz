@@ -1,6 +1,6 @@
 # 0040 측정 화면 시계(C3)·화면 기준 지연·적응형 프레임 다듬기
 
-- 상태: 구현·측정 끝, 수용 기준 통과 → 기본값 adaptive, 감독 검토 대기
+- 상태: 구현·측정 끝. C1–C4 재측정(결정 0041)에서 adaptive 가 수용 기준을 못 맞춰 기본값은 immediate(규칙). 감독 검토 대기
 - 날짜: 2026-10-08
 - 결정한 사람: 감독(C3 채택, 판정을 화면 기준으로, 0039 수용 기준), 작업자(재는 방법, 적응형 다듬기 세부)
 - 관련: 결정 0038(측정 유효성 C1·C2), 0039(프레임 버퍼), docs/bench/server-video.md §2.1
@@ -17,7 +17,7 @@
 | 시계 지표 `display_hz` | rAF 간격을 시간순 4 구간으로 나눠 구간마다 `1000 / 중앙값`, 60 에서 가장 먼 구간 값 | 로드 중 멈춤에 흔들리지 않고, 도중에 시계가 바뀐 실행도 잡는다(PR #37 의 orbit-immediate-4: 59.88, 59.88, 57.47, 57.14) |
 | 지난 실행 감사 | `bench/audit-c3.mjs` — raw 가 있으면 4 구간, 없으면 `1000 / frame_interval_p50`(중앙값만: 도중 변화는 못 잡는다고 표시) | 감독 요청 |
 | native(감독 결정) | ① present 가 FIFO 이고 present 간격 기록이 있는 실행은 **present 간격으로 C3**. 앞으로 native 실행은 present 간격을 반드시 기록한다. ② 기록이 없는 지난 실행은 같은 세션 브라우저 실행의 `display_hz` 로 화면 상태를 추정해 "C3(추정: 같은 세션 브라우저 X Hz)" 로 표시. ③ native 의 `frame_interval`(그리기 루프 간격)로는 C3 를 보지 않는다 | 같은 PC·같은 화면이라 화면이 꺼졌으면 브라우저가 잡는다. P1.5a native 의 60.9–66.8 Hz 는 그리기 루프 간격이었다 |
-| 화면 켜 두기(감독 승인, 앞으로 모든 측정에 필수) | `bench/keep-display.ps1` 을 `bench/gpu-watch.mjs` 가 실행마다 띄움: 시작 때 0 거리 마우스 이동 1 회(입력으로 쳐서 꺼진 화면을 깨움, 포인터는 움직이지 않음), 실행 동안 `SetThreadExecutionState(ES_DISPLAY_REQUIRED)`, 부모가 끝나면 풀고 종료 | 전원 설정은 바꾸지 않는다(동영상 재생기가 하는 요청). 화면이 이미 꺼진 뒤에는 켜 두기 요청만으로는 깨어나지 않음을 확인해 깨우기를 넣었다. headed 로 바꿀 필요 없음(headed 도 화면 상태를 따름) |
+| 화면 켜 두기(감독 승인, 앞으로 모든 측정에 필수) | `bench/measure-env.ps1` 을 `bench/gpu-watch.mjs` 가 실행마다 띄움: 시작 때 0 거리 마우스 이동 1 회(입력으로 쳐서 꺼진 화면을 깨움, 포인터는 움직이지 않음), 실행 동안 `SetThreadExecutionState(ES_DISPLAY_REQUIRED)`, 부모가 끝나면 풀고 종료 | 전원 설정은 바꾸지 않는다(동영상 재생기가 하는 요청). 화면이 이미 꺼진 뒤에는 켜 두기 요청만으로는 깨어나지 않음을 확인해 깨우기를 넣었다. headed 로 바꿀 필요 없음(headed 도 화면 상태를 따름) |
 | **화면 기준 지연** | 그린 객체(입력, `presented` 표시)에 `screen` 시각을 단다: rAF 안에서 그렸으면 그 rAF 의 시각, 밖에서 그렸으면 다음 rAF 의 시각. 지표 `input_screen_latency_p50/p95/max`, `event_screen_latency_{preview,refined}_p50` | 렌더링 갱신 시각 = 화면에 나가는 갱신의 시작. 두 방식을 같은 기준으로 잰다 |
 | 판정 | 서버 영상의 입력 → 표시와 `event_latency` 는 **screen 기준으로 판정·수용**, 기존(그린 시각) 값은 진단으로 함께 싣는다. P3.4 판정은 바꾸지 않는다 | 감독 결정(입력). `event_latency` 도 같은 문제라 같은 기준으로 맞춘다(작업자 결정, 감독 요청에 따라 측정 전에 기록) |
 | **적응형 다듬기** | `?pacing=adaptive`: buffer 와 같되, 그리기 전에 큐에 두 장 이상 있던(여유분을 쓰지 않은) 그리기가 **120 주기(2 s) 연속**이면 머리 한 장을 버리고(`pacing.trimmed`) 다음 장을 그린다. 큐가 비면 다시 두 장을 모아 시작(여유분 복구) | 위상이 안전한 동안은 여유분 없이(immediate 에 가까운 지연), 늦은 도착이 생기면 여유분을 되찾는다. 다듬기는 2 s 에 한 번 이하라 그로 인한 빈 주기는 최대 약 0.8 % |
@@ -42,6 +42,11 @@
 
 ## 결과 (2026-10-08 13:38–13:50, docs/bench/server-video.md §2.2)
 - 24 회 모두 C1·C2·C3 통과(59.88 Hz), 실패·재실행 0 — keep-display 가 동작했다.
-- adaptive: orbit 빠짐 0.40 %(최대 0.66 %, 0/5 > 1 %), 입력 → 표시 p50(screen) orbit 28.1 ms(immediate 25.1, +3.0), replay 33.1 ms(immediate 33.0, +0.1). **수용 기준 통과 → 웹 클라이언트 기본값을 adaptive 로 바꿨다.**
+- adaptive: orbit 빠짐 0.40 %(최대 0.66 %, 0/5 > 1 %), 입력 → 표시 p50(screen) orbit 28.1 ms(immediate 25.1, +3.0), replay 33.1 ms(immediate 33.0, +0.1). 이 측정은 **C4 미상**(결정 0041) — 아래 C1–C4 재측정이 판정이다.
 - 대가: refined `event_latency`(screen) 가 immediate 보다 약 40 ms 길다(150 대 108 ms, 목표 250 안). 원인 분리 안 함.
-- C3 감사: docs/bench/c3-audit.md.
+- C3 감사: docs/bench/validity-audit.md.
+
+## 결과 2 — C1–C4 준수 재측정 (2026-10-08 14:12–14:23, server-video.md §2.3, 결정 0041)
+- 24 회 모두 C1–C4 통과. adaptive: orbit 빠짐 최대 0.79 %(통과), 입력 → 표시 p50(screen) orbit 39.6 ms(+6.5, 통과), **replay 45.1 ms(> 40 ms, 미달)**.
+- **수용 기준 미달 → 규칙대로 웹 클라이언트 기본값은 immediate.** buffer·adaptive 는 `?pacing=` 선택지. C(서버 틱 위상 맞추기)를 다시 본다.
+- 이 세션의 immediate 는 orbit 빠짐 8.15 %(5/5 > 1 %) — SPEC 판정 미달. 판정 변경은 P4.6 의 C1–C4 전체 비교에서 함께 싣는다.

@@ -8,6 +8,7 @@
 
 import { spawn, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
+import path from 'node:path';
 
 const argv = process.argv.slice(2);
 const sep = argv.indexOf('--');
@@ -25,10 +26,24 @@ const apps = () =>
 const rows = [];
 const t0 = Date.now();
 let phase = 'before';
-// Keep the display on for the whole run (decision 0040, rule C3): a display turned off by the idle
-// timeout slows the browser frame clock to ~56.6 Hz. The helper exits with this process.
+// Measurement environment for the whole run (bench/measure-env.ps1, decisions 0040, 0041): display
+// kept on (rule C3), Windows power throttling off for the run's processes, and the C4 CPU
+// calibration + % Processor Performance written to <out>.cpu.log. Waits for the calibration so
+// it does not overlap the run. The helper exits with this process.
 if (process.platform === 'win32') {
-  spawn('powershell', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', 'bench/keep-display.ps1', '-ParentPid', String(process.pid)], { stdio: 'ignore', detached: false });
+  const cpuOut = out.replace(/\.gpu\.csv$/, '') + '.cpu.log';
+  fs.writeFileSync(cpuOut, '');
+  const env = spawn('powershell', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', 'bench/measure-env.ps1',
+    '-ParentPid', String(process.pid), '-Out', path.resolve(cpuOut), '-Repo', process.cwd()], { stdio: ['ignore', 'pipe', 'ignore'] });
+  await new Promise((resolve) => {
+    const timer = setTimeout(resolve, 15000);
+    env.stdout.on('data', (d) => {
+      if (String(d).includes('ready')) {
+        clearTimeout(timer);
+        resolve();
+      }
+    });
+  });
 }
 const smi = spawn('nvidia-smi', ['--query-gpu=utilization.gpu,utilization.encoder,clocks.gr,pstate', '--format=csv,noheader,nounits', '-lms', '500'], { stdio: ['ignore', 'pipe', 'ignore'] });
 let buf = '';

@@ -13,11 +13,13 @@
 const params = new URLSearchParams(location.search);
 const url = params.get('ws') ?? 'ws://127.0.0.1:8720';
 const sendInputs = params.get('inputs') === '1';
-// Frame pacing (decisions 0039, 0040). 'adaptive' (default) draws one queued frame per display
-// cycle with one spare, and drops the spare once it has gone unused for TRIM_WINDOW cycles, so the
-// phase between the server tick and vsync no longer shows as empty/double cycles at little latency
-// cost; 'buffer' always keeps the spare; 'immediate' draws each frame as it is decoded.
-const pacing = ['immediate', 'buffer'].includes(params.get('pacing')) ? params.get('pacing') : 'adaptive';
+// Frame pacing (decisions 0039–0041). 'immediate' (default) draws each frame as it is decoded.
+// 'buffer' draws one queued frame per display cycle with one spare, so the phase between the
+// server tick and vsync no longer shows as empty/double cycles; 'adaptive' is 'buffer' that drops
+// the spare once it has gone unused for TRIM_WINDOW cycles. Both smooth the stutter but cost
+// latency: adaptive missed the acceptance bound in replay under C1–C4 (45.1 > 40 ms), so the
+// default stayed immediate (supervisor rule, PR #37 review).
+const pacing = ['buffer', 'adaptive'].includes(params.get('pacing')) ? params.get('pacing') : 'immediate';
 const SLACK = 2; // frames queued before drawing starts (head + one spare); more are dropped oldest-first
 const TRIM_WINDOW = 120; // cycles (2 s at 60 Hz) in a row with the spare unused before it is dropped
 const pb = (window.__pb = {

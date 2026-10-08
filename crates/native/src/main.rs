@@ -493,7 +493,9 @@ impl App {
     /// the display, so the times at which 120 back-to-back acquires return are paced by it. Run at
     /// the end, after everything measured. Empty without vsync (the acquire is not paced then).
     fn clock_probe(&mut self) -> Vec<f64> {
-        let Some(gpu) = &mut self.gpu else { return Vec::new() };
+        let Some(gpu) = &mut self.gpu else {
+            return Vec::new();
+        };
         if !self.args.vsync {
             return Vec::new();
         }
@@ -535,7 +537,12 @@ impl App {
         if let Some(path) = &self.args.marks {
             let mut out = self.marks.lines.clone();
             let clock: Vec<String> = clock.iter().map(|f| format!("{f:.3}")).collect();
-            writeln!(out, "{{\"name\":\"present_clock\",\"t\":[{}]}}", clock.join(",")).unwrap();
+            writeln!(
+                out,
+                "{{\"name\":\"present_clock\",\"t\":[{}]}}",
+                clock.join(",")
+            )
+            .unwrap();
             let frames: Vec<String> = self
                 .marks
                 .frames

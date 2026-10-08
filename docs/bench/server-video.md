@@ -67,6 +67,8 @@ pointblitz-bench compare target/bench/pointblitz-native target/bench/p34/video-v
 
 ### 2.2 적응형 다듬기(결정 0040) — C3 준수, 화면 기준 지연
 
+> **C4 미상(결정 0041)**: 이 절의 측정(13:38–13:50)에는 CPU 상태 기록이 없다. 그 무렵부터 Windows 전원 조절(EcoQoS)이 측정 프로세스를 효율 코어로 옮겼을 수 있다. 숫자는 지우지 않으며, C1–C4 를 지켜 다시 잰 값은 §2.3 이다. 이 절의 "수용 기준 통과" 는 §2.3 에서 뒤집혔다.
+
 같은 세션(2026-10-08 13:38–13:50), keep-display, adaptive / buffer / immediate 번갈아 orbit 5 회씩 + replay ×60 3 회씩. 24 회 모두 C1·C2·C3 통과(59.88 Hz), 실패·재실행 0. 값은 중앙값(괄호는 최소–최대). 입력 → 표시와 `event_latency` 는 화면 기준(`*_screen_*`, 결정 0040), 괄호 밖 "그린 시각" 값은 진단.
 
 | 지표 | immediate | buffer | **adaptive(기본)** | 목표 |
@@ -87,6 +89,25 @@ pointblitz-bench compare target/bench/pointblitz-native target/bench/p34/video-v
 - 대가: refined 반영(`event_latency` refined)이 adaptive·buffer 에서 immediate 보다 약 40 ms 길다(목표 250 안). 스냅샷 교체 때 서버 렌더가 늦어 큐가 비면 여유분을 다시 모으느라 기다리는 것으로 본다. 원인 분리는 하지 않았다.
 - replay 는 세 방식 모두 1 % 를 넘는다(보고만 — 판정 대상은 orbit). 스냅샷 교체 때 서버 프레임이 늦는 것이 남는다.
 - 스냅샷 교체 프레임(그 스냅샷을 처음 보여 주는 프레임) 크기: 41 개 p50 13.9 KiB, 최대 171.0 KiB. 정지 프레임 p50 0.2 KiB, p95 3.6 KiB(immediate replay raw, `bench/video/frame-bytes.mjs`).
+
+### 2.3 같은 비교, C1–C4 준수(결정 0041) — 이것이 판정
+
+같은 세션(2026-10-08 14:12–14:23), `bench/measure-env.ps1`(화면 켜 둠 + 측정 프로세스 전원 조절 끔), adaptive / buffer / immediate 번갈아 orbit 5 회씩 + replay ×60 3 회씩. 24 회 모두 C1–C4 통과(59.88 Hz, CPU 보정 12,531–12,777 회/s = 기준의 99–101 %, 서버 늦은 틱 ≤ 0.25 %), 실패·재실행 0. 전원 조절 끈 프로세스는 실행마다 16–30 개(실패 0), 실행 중 `% Processor Performance` p50 188–199 %.
+
+| 지표 | immediate | buffer | adaptive | 목표 |
+|---|---|---|---|---|
+| 프레임 빠짐 orbit | **8.15 % (6.82–9.06), 5/5 > 1 %** | 0.52 % (0.39–0.66), 0/5 | 0.66 % (0.39–0.79), 0/5 | ≤ 1 % |
+| 입력 → 표시 p50 orbit (screen) | 33.1 (32.9–37.9) ms | 49.3 (32.9–50.0) ms | 39.6 (34.2–50.2) ms | ≤ 50 |
+| 입력 → 표시 p95 orbit (screen) | 46.0 ms | 51.3 ms | 50.2 ms | ≤ 80 |
+| 입력 → 표시 p50 replay ×60 (screen) | 33.8 ms | 49.4 ms | **45.1 (43.2–49.5) ms** | ≤ 50 |
+| 입력 → 표시 p95 replay ×60 (screen) | 49.8 ms | 53.2 ms | 53.8 ms | ≤ 80 |
+| `event_latency` preview p50 ×60 (screen) | 19.3 ms | 32.0 ms | 37.9 ms | ≤ 80 |
+| `event_latency` refined p50 ×60 (screen) | 107.2 ms | 136.3 ms | 132.8 ms | ≤ 250 |
+| 프레임 빠짐 replay ×60(보고만) | 8.23 % | 1.47 % | 1.28 % | — |
+
+- **0039 수용 기준(감독)을 adaptive 가 못 맞췄다**: replay 입력 → 표시 p50 45.1 ms 가 40 ms 를 넘는다(immediate 대비 +11.3 ms 는 16.7 ms 안, orbit 은 +6.5 ms·39.6 ms 로 통과, orbit 빠짐 모든 실행 ≤ 1 % 통과).
+- **그래서 규칙대로 웹 클라이언트 기본값은 immediate 로 되돌렸다.** buffer·adaptive 는 `?pacing=` 선택지로 남는다. 감독 조건대로 C(서버 틱 위상 맞추기)를 다시 본다.
+- 판정(SPEC §7.1 서버 영상 프레임 빠짐 ≤ 1 %, 실행 중앙값): **이 세션의 immediate 는 8.15 % 로 미달**이다. P3.4 판정(통과, C4 미상)은 지우지 않고 두며, 판정이 바뀌는 것은 P4.6 의 C1–C4 전체 비교에서 함께 싣는다. immediate 의 빠짐이 이 세션에서 5 회 모두 높았던 것은 위상(diagnostics.md P4.3)이 이 세션 내내 경계 근처였기 때문으로 본다 — 실행마다 위상은 연결 때 정해지는데, 이번에는 고르게 나빴다(원인 확인 안 함).
 
 ## 3. 같은 세션 전체 비교 (중앙값)
 

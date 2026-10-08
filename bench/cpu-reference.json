@@ -1,0 +1,6 @@
+{
+  "device": "13th Gen Intel(R) Core(TM) i7-13700F",
+  "iters_per_s": 12650,
+  "measured": "2026-10-08, bench/measure-env.ps1 calibration loop with power throttling off (runs: 12643-12723)",
+  "rule": "C4: a run whose calibration is below 90 % of this is invalid (decision 0041)"
+}
