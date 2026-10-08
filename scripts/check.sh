@@ -1,0 +1,40 @@
+#!/usr/bin/env bash
+# Everything CI checks, runnable before opening a PR (PROJECT §2). Run from the repository root.
+#
+# Also checks the other OS's code paths from this machine, so a cfg(windows) / cfg(not(windows))
+# split cannot break the other CI job unseen (PR #24 broke the Ubuntu build that way):
+#   rustup target add x86_64-unknown-linux-gnu   (on Windows)   or   x86_64-pc-windows-msvc (on Linux)
+set -euo pipefail
+
+step() { printf '\n== %s\n' "$*"; }
+
+step fmt
+cargo fmt --all --check
+
+step "clippy (host)"
+cargo clippy --workspace --all-targets -- -D warnings
+
+host=$(rustc -vV | sed -n 's/^host: //p')
+case "$host" in
+  *windows*) other=x86_64-unknown-linux-gnu ;;
+  *) other=x86_64-pc-windows-msvc ;;
+esac
+if rustup target list --installed | grep -qx "$other"; then
+  step "clippy ($other — the other CI OS, check only)"
+  cargo clippy --workspace --all-targets --target "$other" -- -D warnings
+else
+  echo "warning: target $other not installed; the other OS's cfg paths are not checked (rustup target add $other)" >&2
+fi
+
+step "clippy (wasm32: web default, web WebGPU-only)"
+cargo clippy -p pointblitz-web --target wasm32-unknown-unknown -- -D warnings
+cargo clippy -p pointblitz-web --target wasm32-unknown-unknown --no-default-features -- -D warnings
+
+step test
+cargo test --workspace
+
+step "browser client unit tests"
+node --test web/chunks.test.mjs
+
+echo
+echo "all checks passed"
