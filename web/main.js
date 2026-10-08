@@ -219,16 +219,18 @@ async function cold(manifest) {
 
 // Synchronised frames (decision 0020), like the baseline and native orbit, drawn offscreen like
 // native (decision 0033). cpu = render_offscreen() call (encode + submit); total = until the GPU is
-// done. WebGL2: a 1-pixel readPixels on the same context, exactly the baseline's sync (a WebGL fence
-// only reports at frame boundaries, ~16.7 ms). WebGPU: the frame's first pixel is copied to a
-// small buffer and mapped (mapAsync resolves only after the GPU finished the frame) — the WebGPU counterpart of
-// readPixels; the asynchronous resolution makes total an upper bound.
+// done: the frame's first pixel is copied from the offscreen target to a small buffer and mapped
+// (the map resolves only after the GPU finished the frame) — on WebGPU and WebGL2 alike (decision
+// 0049). The WebGL2 path used to readPixels the canvas instead, which never waits for an offscreen
+// frame: the first ~480 frames looked like 0.1 ms until the queue filled (P4.6 to p48). The
+// asynchronous resolution makes total an upper bound.
 async function orbit() {
   const framesPerView = Number(params.get('frames') ?? 120);
   const batch = Math.max(1, Number(params.get('batch') ?? 1));
   for (let i = 0; i < 3; i++) await redraw(); // let the swapped snapshot reach the screen first
   stopLoop = true;
-  const gl = pb.info.backend === 'Gl' ? document.getElementById('view').getContext('webgl2') : null;
+  // glsync=canvas: the old WebGL2 sync, for the before/after check only (decision 0049).
+  const gl = pb.info.backend === 'Gl' && params.get('glsync') === 'canvas' ? document.getElementById('view').getContext('webgl2') : null;
   const syncPixel = new Uint8Array(4);
   mark('sync_start');
   for (const v of viewpoints) {
@@ -239,7 +241,7 @@ async function orbit() {
       for (let j = 0; j < batch; j++) viewer.render_offscreen();
       const t1 = performance.now();
       if (gl) {
-        // Read from the default framebuffer, then restore wgpu's binding.
+        // glsync=canvas only: read the default framebuffer, then restore wgpu's binding.
         const bound = gl.getParameter(gl.READ_FRAMEBUFFER_BINDING);
         gl.bindFramebuffer(gl.READ_FRAMEBUFFER, null);
         gl.readPixels(0, 0, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, syncPixel);
