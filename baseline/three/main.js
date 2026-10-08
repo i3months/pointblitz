@@ -1,20 +1,28 @@
-// Reference implementation of the current three.js approach (decision 0005, 0019).
-// Benchmark only — deliberately NOT optimised: every snapshot is downloaded whole, parsed on the
-// main thread with PLYLoader, and the previous THREE.Points is thrown away.
+// three.js baselines (decisions 0005, 0019, 0048). One page, three ways to show the same flight:
+//
+//   mode=full (B0, default) — decision 0005: every snapshot is downloaded whole, parsed on the main
+//       thread with PLYLoader, and the previous THREE.Points is thrown away; drawn every rAF.
+//   mode=b1 — three.js on PointBlitz's own data path: the /chunks stream (GPU-layout binary, preview
+//       snapshots as deltas) goes to the GPU without parsing, chunk by chunk; a refined snapshot
+//       becomes visible when its last chunk arrived; drawn only when something changed.
+//   mode=b2 — SkyLens-style increments: the PLY (preview snapshots: only the appended records), parsed
+//       in a Web Worker, appended or (refined) replaced; drawn only when something changed.
 //
 // URL parameters:
 //   scenario = replay | cold | orbit   (SPEC §6.1); memtest | memspike = memory metric self-checks
 //   speed    = replay speed factor (default 60)
 //   view     = viewpoint name to hold (default overview_sw)
 //   frames   = frames per viewpoint in orbit (default 120)
+//   mode     = full | b1 | b2
+//   renderer = webgl (default) | webgpu   (b1 only: three.js WebGPURenderer, decision 0048)
+//   upload   = a (default) | b            (b1 upload, chosen by smoke — decision 0048)
 //
 // Measurement hooks live on window.__pb (read by the harness):
 //   marks   [{name, t, ...}]  t = performance.now() in ms
 //   frames  [t, ...]          requestAnimationFrame timestamps
 //   setView(name), ready, done
 
-import * as THREE from 'three';
-import { PLYLoader } from 'three/addons/loaders/PLYLoader.js';
+import { ChunkSplitter } from '/static/web/chunks.js';
 
 const WIDTH = 1920;
 const HEIGHT = 1080;
@@ -25,18 +33,39 @@ const scenario = params.get('scenario') ?? 'replay';
 const speed = Number(params.get('speed') ?? 60);
 const framesPerView = Number(params.get('frames') ?? 120);
 const batch = Math.max(1, Number(params.get('batch') ?? 1));
+const mode = params.get('mode') ?? 'full';
+const webgpu = params.get('renderer') === 'webgpu';
+const upload = params.get('upload') ?? 'a';
+if (!['full', 'b1', 'b2'].includes(mode)) throw new Error(`unknown mode ${mode}`);
+if (webgpu && mode !== 'b1') throw new Error('renderer=webgpu is only for mode=b1');
 
-const pb = (window.__pb = { marks: [], frames: [], longtasks: [], syncFrames: [], ready: false, done: false, setView });
+// three.webgpu.js is a superset of three.module.js; the two builds must not be mixed on one page.
+const THREE = webgpu ? await import('three/webgpu') : await import('three');
+const TSL = webgpu ? await import('three/tsl') : null;
+
+const pb = (window.__pb = { marks: [], frames: [], longtasks: [], syncFrames: [], ready: false, done: false, setView, mode });
 // Main-thread blocks over 50 ms (SPEC §6.2 main_thread_block).
 new PerformanceObserver((list) => {
   for (const e of list.getEntries()) pb.longtasks.push({ t: e.startTime, ms: e.duration });
 }).observe({ type: "longtask", buffered: true });
 const mark = (name, extra = {}) => pb.marks.push({ name, t: performance.now(), ...extra });
 
-const renderer = new THREE.WebGLRenderer({ antialias: false, preserveDrawingBuffer: true });
+const renderer = webgpu
+  ? new THREE.WebGPURenderer({ antialias: false })
+  : new THREE.WebGLRenderer({ antialias: false, preserveDrawingBuffer: true });
 renderer.setPixelRatio(1);
 renderer.setSize(WIDTH, HEIGHT);
 document.body.appendChild(renderer.domElement);
+if (webgpu) {
+  await renderer.init();
+  const info = renderer.backend.adapter?.info ?? {};
+  pb.gpu = { vendor: info.vendor ?? '?', architecture: info.architecture ?? '?' };
+  pb.info = { format: 'three.js WebGPURenderer' };
+}
+// B1/B2 hand three.js the snapshot's sRGB bytes as they are. With the default sRGB output they
+// would be treated as linear and brightened, so the output transfer is switched off instead of
+// converting every colour on the CPU (decision 0048; checked by SSIM against B0).
+if (mode !== 'full') renderer.outputColorSpace = THREE.LinearSRGBColorSpace;
 
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x000000);
@@ -62,16 +91,35 @@ function diskTexture() {
   tex.magFilter = THREE.NearestFilter;
   return tex;
 }
-const material = new THREE.PointsMaterial({
-  size: POINT_SIZE_PX,
-  sizeAttenuation: false,
-  vertexColors: true,
-  map: diskTexture(),
-  alphaTest: 0.5,
-});
 
-let points = null;
+// WebGPU has 1-pixel point primitives only, so three.js draws sized points as one instanced quad
+// per point (PointsNodeMaterial on a non-Points object) — as PointBlitz does on WebGPU. One shared
+// material reads the per-point attributes by name, so new chunks never compile a new pipeline.
+function webgpuMaterial() {
+  const { attribute, uv, vec4, float, step, length } = TSL;
+  const m = new THREE.PointsNodeMaterial({ sizeAttenuation: false });
+  m.size = POINT_SIZE_PX;
+  m.positionNode = attribute('instancePosition', 'vec3');
+  m.colorNode = vec4(attribute('instanceColor', 'vec4').rgb, float(1));
+  m.opacityNode = step(length(uv().sub(0.5)), float(0.5)); // 1 inside the disk, 0 outside
+  m.alphaTest = 0.5;
+  m.alphaToCoverage = false;
+  return m;
+}
+
+const material = webgpu
+  ? webgpuMaterial()
+  : new THREE.PointsMaterial({
+      size: POINT_SIZE_PX,
+      sizeAttenuation: false,
+      vertexColors: true,
+      map: diskTexture(),
+      alphaTest: 0.5,
+    });
+
+let points = null; // B0: the one THREE.Points
 let viewpoints = [];
+let dirty = true; // B1/B2 draw only when something changed
 
 function setView(name) {
   const v = viewpoints.find((x) => x.name === name);
@@ -80,13 +128,14 @@ function setView(name) {
   camera.up.set(...v.up);
   camera.lookAt(...v.target);
   camera.updateMatrixWorld();
+  dirty = true;
   mark('view', { view: name });
 }
 
-const loader = new PLYLoader();
+const loader = mode === 'full' ? new (await import('three/addons/loaders/PLYLoader.js')).PLYLoader() : null;
 
-// One snapshot, the way the current app would do it: whole file, main-thread parse, full replace.
-async function loadSnapshot(ev) {
+// B0: one snapshot, the way decision 0005 defines it: whole file, main-thread parse, full replace.
+async function loadSnapshotFull(ev) {
   mark('fetch_start', { seq: ev.seq });
   const res = await fetch(ev.url, { cache: 'no-store' });
   const buf = await res.arrayBuffer();
@@ -110,20 +159,214 @@ async function loadSnapshot(ev) {
   pendingPresent.push(ev.seq);
 }
 
-const pendingPresent = [];
+// ---- B1 / B2: a scene made of pieces, appended (preview) or swapped as a generation (refined).
+
+let have = null; // [generation, points] the shown scene holds (same rule as PointBlitz, decision 0026)
+let shown = null; // THREE.Group on screen
+let shownPoints = 0;
+
+function sphereFromBox(min, max) {
+  const center = new THREE.Vector3((min[0] + max[0]) / 2, (min[1] + max[1]) / 2, (min[2] + max[2]) / 2);
+  const r = Math.hypot(max[0] - min[0], max[1] - min[1], max[2] - min[2]) / 2;
+  return new THREE.Sphere(center, r);
+}
+
+// A drawable piece from per-point positions / colours (typed arrays or interleaved views). The
+// bounding sphere comes with the data, so three.js never walks the points to compute it.
+function piece(position, color, count, sphere) {
+  let obj;
+  if (webgpu) {
+    const g = new THREE.InstancedBufferGeometry();
+    // The quad every point is drawn with (PointsNodeMaterial offsets it by the point size).
+    g.setAttribute('position', new THREE.Float32BufferAttribute([-0.5, -0.5, 0, 0.5, -0.5, 0, 0.5, 0.5, 0, -0.5, 0.5, 0], 3));
+    g.setAttribute('uv', new THREE.Float32BufferAttribute([0, 0, 1, 0, 1, 1, 0, 1], 2));
+    g.setIndex([0, 1, 2, 0, 2, 3]);
+    g.setAttribute('instancePosition', position);
+    g.setAttribute('instanceColor', color);
+    g.instanceCount = count;
+    g.boundingSphere = sphere;
+    obj = new THREE.Mesh(g, material);
+  } else {
+    const g = new THREE.BufferGeometry();
+    g.setAttribute('position', position);
+    g.setAttribute('color', color);
+    g.boundingSphere = sphere;
+    obj = new THREE.Points(g, material);
+  }
+  return obj;
+}
+
+function disposeGroup(g) {
+  scene.remove(g);
+  for (const o of g.children) o.geometry.dispose();
+}
+
+// B1 piece from one PointBlitz chunk (decision 0022: 80 B header, then 16 B/point: f32×3 + u8×4).
+function chunkPiece(chunk) {
+  const v = new DataView(chunk.buffer, chunk.byteOffset, 80);
+  const n = v.getUint32(16, true);
+  const origin = [v.getFloat64(24, true), v.getFloat64(32, true), v.getFloat64(40, true)];
+  const f = (o) => [v.getFloat32(o, true), v.getFloat32(o + 4, true), v.getFloat32(o + 8, true)];
+  const sphere = sphereFromBox(f(48), f(60));
+  const Attr = webgpu ? THREE.InstancedBufferAttribute : THREE.BufferAttribute;
+  let position, color;
+  if (upload === 'a') {
+    // (a) the chunk bytes as they are: one interleaved view per type (three.js takes one typed
+    // array per InterleavedBuffer), so the same bytes go to the GPU twice — 32 B/point.
+    const IB = webgpu ? THREE.InstancedInterleavedBuffer : THREE.InterleavedBuffer;
+    position = new THREE.InterleavedBufferAttribute(new IB(new Float32Array(chunk.buffer, chunk.byteOffset + 80, n * 4), 4), 3, 0);
+    color = new THREE.InterleavedBufferAttribute(new IB(new Uint8Array(chunk.buffer, chunk.byteOffset + 80, n * 16), 16), webgpu ? 4 : 3, 12, true);
+  } else {
+    // (b) split on the CPU into tightly packed position / colour arrays — 16 B/point on the GPU.
+    const src = new Float32Array(chunk.buffer, chunk.byteOffset + 80, n * 4);
+    const bytes = new Uint8Array(chunk.buffer, chunk.byteOffset + 80, n * 16);
+    const pos = new Float32Array(n * 3);
+    const col = new Uint8Array(n * 4);
+    for (let i = 0; i < n; i++) {
+      pos[i * 3] = src[i * 4];
+      pos[i * 3 + 1] = src[i * 4 + 1];
+      pos[i * 3 + 2] = src[i * 4 + 2];
+      col[i * 4] = bytes[i * 16 + 12];
+      col[i * 4 + 1] = bytes[i * 16 + 13];
+      col[i * 4 + 2] = bytes[i * 16 + 14];
+      col[i * 4 + 3] = 255;
+    }
+    position = new Attr(pos, 3);
+    color = new Attr(col, 4, true);
+  }
+  const obj = piece(position, color, n, sphere);
+  obj.position.set(...origin);
+  obj.updateMatrixWorld();
+  return { obj, n };
+}
+
+const BYTES_PER_POINT = { b1a: 32, b1b: 16, b2: 16 };
+
+async function loadSnapshotB1(ev) {
+  const q = have ? `?have=${have[0]}.${have[1]}` : '';
+  mark('fetch_start', { seq: ev.seq });
+  const res = await fetch(`/chunks/${ev.seq}${q}`, { cache: 'no-store' });
+  if (!res.ok) throw new Error(`chunks ${ev.seq}: ${res.status}`);
+  const delivery = res.headers.get('X-PB-Delivery');
+  const generation = Number(res.headers.get('X-PB-Generation'));
+  // A delta appends to the shown generation. A full delivery builds a new one: the very first is
+  // shown progressively, a later one is swapped in when its last chunk arrived (as PointBlitz).
+  const into = delivery === 'delta' ? shown : new THREE.Group();
+  const progressive = delivery !== 'delta' && !shown;
+  if (progressive) {
+    shown = into;
+    scene.add(into);
+  }
+  let bytes = 0;
+  let added = 0;
+  let lastSeen = false;
+  const splitter = new ChunkSplitter((chunk, last) => {
+    const { obj, n } = chunkPiece(chunk);
+    into.add(obj);
+    added += n;
+    if (into === shown) dirty = true;
+    if (last) lastSeen = true;
+  });
+  const reader = res.body.getReader();
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    bytes += value.length;
+    splitter.push(value);
+  }
+  if (!lastSeen) throw new Error(`chunks ${ev.seq}: delivery ended without its last chunk`);
+  mark('fetch_end', { seq: ev.seq, bytes, delivery, generation });
+  shownPoints = delivery === 'delta' ? shownPoints + added : added;
+  mark('parse_end', { seq: ev.seq, points: shownPoints, bytesPerPoint: BYTES_PER_POINT[`b1${upload}`] });
+  if (delivery !== 'delta' && !progressive) {
+    disposeGroup(shown);
+    shown = into;
+    scene.add(into);
+  }
+  have = [generation, ev.points];
+  dirty = true;
+  mark('scene_swap', { seq: ev.seq });
+  pendingPresent.push(ev.seq);
+}
+
+// B2: PLY parsed off the main thread.
+const worker = mode === 'b2' ? new Worker('/static/baseline/three/ply-worker.js', { type: 'module' }) : null;
+let workerJob = 0;
+const workerWaiting = new Map();
+if (worker) {
+  worker.onmessage = (m) => {
+    const w = workerWaiting.get(m.data.id);
+    workerWaiting.delete(m.data.id);
+    if (m.data.error) w.reject(new Error(m.data.error));
+    else w.resolve(m.data);
+  };
+}
+function parseInWorker(buffer, skip) {
+  const id = ++workerJob;
+  return new Promise((resolve, reject) => {
+    workerWaiting.set(id, { resolve, reject });
+    worker.postMessage({ id, buffer, skip }, [buffer]); // transferred, not copied
+  });
+}
+
+async function loadSnapshotB2(ev) {
+  mark('fetch_start', { seq: ev.seq });
+  const res = await fetch(`${ev.url}?have=${have ? `${have[0]}.${have[1]}` : ''}`, { cache: 'no-store' });
+  if (!res.ok) throw new Error(`data ${ev.seq}: ${res.status}`);
+  const delivery = res.headers.get('X-PB-Delivery');
+  const generation = Number(res.headers.get('X-PB-Generation'));
+  const skip = Number(res.headers.get('X-PB-Skip'));
+  const buf = await res.arrayBuffer();
+  mark('fetch_end', { seq: ev.seq, bytes: buf.byteLength, delivery, generation });
+  const r = await parseInWorker(buf, skip);
+  const obj = piece(new THREE.BufferAttribute(r.position, 3), new THREE.BufferAttribute(r.color, 4, true), r.count, sphereFromBox(r.min, r.max));
+  shownPoints = delivery === 'delta' ? shownPoints + r.count : r.count;
+  mark('parse_end', { seq: ev.seq, points: shownPoints, bytesPerPoint: BYTES_PER_POINT.b2, worker_ms: r.ms });
+  if (delivery === 'delta') {
+    shown.add(obj);
+  } else {
+    if (shown) disposeGroup(shown);
+    shown = new THREE.Group();
+    shown.add(obj);
+    scene.add(shown);
+  }
+  have = [generation, ev.points];
+  dirty = true;
+  mark('scene_swap', { seq: ev.seq });
+  pendingPresent.push(ev.seq);
+}
+
+const loadSnapshot = { full: loadSnapshotFull, b1: loadSnapshotB1, b2: loadSnapshotB2 }[mode];
+
+// Waits until the GPU finished the submitted work (decision 0020's sync). WebGL: a 1-pixel
+// readPixels, synchronous, returns nothing (B0 keeps its exact timing). WebGPU: a promise.
 const syncPixel = new Uint8Array(4);
+function gpuDone() {
+  if (webgpu) return renderer.backend.device.queue.onSubmittedWorkDone();
+  const gl = renderer.getContext();
+  gl.readPixels(0, 0, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, syncPixel);
+  return null;
+}
+
+const pendingPresent = [];
 let stopLoop = false;
-function frame(t) {
+async function frame(t) {
   if (stopLoop) return;
   pb.frames.push(t);
-  renderer.render(scene, camera);
-  if (pendingPresent.length) {
-    // The first frame that contains a new snapshot is synchronised once (decision 0020): 'submitted'
-    // is when render() returned, 'presented' is when the GPU finished drawing it. One sync per
-    // snapshot (14 per flight) — a measurement artefact, applied identically to every implementation.
-    for (const seq of pendingPresent) mark('submitted', { seq });
-    renderer.getContext().readPixels(0, 0, 1, 1, WebGL2RenderingContext.RGBA, WebGL2RenderingContext.UNSIGNED_BYTE, syncPixel);
-    while (pendingPresent.length) mark('presented', { seq: pendingPresent.shift() });
+  // B0 draws every frame (decision 0005); B1/B2 only when something changed.
+  if (mode === 'full' || dirty || pendingPresent.length) {
+    dirty = false;
+    renderer.render(scene, camera);
+    if (pendingPresent.length) {
+      // The first frame that contains a new snapshot is synchronised once (decision 0020): 'submitted'
+      // is when render() returned, 'presented' is when the GPU finished drawing it. One sync per
+      // snapshot (14 per flight) — a measurement artefact, applied identically to every implementation.
+      const seqs = pendingPresent.splice(0);
+      for (const seq of seqs) mark('submitted', { seq });
+      const wait = gpuDone();
+      if (wait) await wait;
+      for (const seq of seqs) mark('presented', { seq, points: shownPoints || undefined });
+    }
   }
   requestAnimationFrame(frame);
 }
@@ -133,7 +376,7 @@ async function main() {
   setView(params.get('view') ?? 'overview_sw');
   requestAnimationFrame(frame);
   const manifest = (await (await fetch('/manifest.json')).json()).events;
-  mark('start', { scenario });
+  mark('start', { scenario, mode, renderer: webgpu ? 'webgpu' : 'webgl', upload: mode === 'b1' ? upload : undefined });
   pb.ready = true;
 
   if (scenario === 'memtest') {
@@ -172,6 +415,7 @@ async function main() {
       const ev = JSON.parse(m.data);
       mark('snapshot_received', { seq: ev.seq, kind: ev.kind });
       chain = chain.then(() => loadSnapshot(ev));
+      chain.catch((e) => mark('error', { message: String(e) }));
     });
     es.addEventListener('end', () => {
       es.close();
@@ -182,16 +426,15 @@ async function main() {
     mark('snapshot_received', { seq: last.seq, kind: last.kind });
     await loadSnapshot(last);
     if (scenario === 'orbit') {
-      // Synchronised frames (decision 0020): each frame is followed by a 1-pixel readPixels, which
-      // waits for the GPU to finish. rAF intervals do not include GPU work, so they cannot measure
-      // render cost. cpu = render() call alone (command recording + submit); total = cpu + GPU
-      // execution + sync; gpu_estimate = total − cpu.
+      // Synchronised frames (decision 0020): each frame is followed by a sync that waits for the
+      // GPU to finish. rAF intervals do not include GPU work, so they cannot measure render cost.
+      // cpu = render() call alone (command recording + submit); total = cpu + GPU execution + sync;
+      // gpu_estimate = total − cpu.
       // Let the normal loop present the swapped snapshot first (its presented mark must not wait for
       // the sync loop — PR #6 review), then stop it for the synchronised frames.
       await waitFrames(3);
       stopLoop = true;
       await waitFrames(1);
-      const gl = renderer.getContext();
       mark('sync_start');
       for (const v of viewpoints) {
         setView(v.name);
@@ -201,13 +444,15 @@ async function main() {
           const t0 = performance.now();
           for (let j = 0; j < batch; j++) renderer.render(scene, camera);
           const t1 = performance.now();
-          gl.readPixels(0, 0, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, syncPixel);
+          const wait = gpuDone();
+          if (wait) await wait;
           const t2 = performance.now();
           pb.syncFrames.push({ view: v.name, cpu: (t1 - t0) / batch, ms: (t2 - t0) / batch, batch });
         }
       }
       mark('sync_end');
       stopLoop = false;
+      dirty = true;
       requestAnimationFrame(frame);
     }
     await waitFrames(2);

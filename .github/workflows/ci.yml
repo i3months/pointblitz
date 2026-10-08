@@ -58,4 +58,4 @@ jobs:
             printf '%s raw %s gzip %s\n' "$f" "$(wc -c < "$f")" "$(gzip -9 -c "$f" | wc -c)"
           done
       - name: browser client unit tests (node --test)
-        run: node --test web/chunks.test.mjs
+        run: node --test web/chunks.test.mjs baseline/three/ply-parse.test.mjs
