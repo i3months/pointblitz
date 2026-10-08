@@ -55,6 +55,7 @@ pointblitz-bench compare target/bench/pointblitz-native target/bench/p34/video-v
 | 입력 → 표시 p95 orbit | 24.4 (17.6–27.6) ms | **39.2 (34.6–53.7) ms** | ≤ 80 |
 | 프레임 빠짐 replay ×60(보고만) | 2.60 % | 1.23 % (1.20–1.25) | — |
 | 입력 → 표시 p50 replay ×60 | 20.0 ms | **45.1 (43.7–46.5) ms** | ≤ 50 |
+| 입력 → 표시 p95 replay ×60 | 27.9 (26.9–29.0) ms | **54.4 (53.3–55.5) ms** | ≤ 80 |
 | `event_latency` preview p50 (×60) | 13.1 ms | 39.9 (36.8–42.9) ms | ≤ 80 |
 | `event_latency` refined p50 (×60) | 110.5 ms | 113.6 ms | ≤ 250 |
 
