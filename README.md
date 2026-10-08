@@ -110,7 +110,7 @@ Server video options and limits (decision 0042):
 | P1 | core + native renderer |
 | P2 | browser (wasm, WebGPU / WebGL2) |
 | P3 | server-side rendering with hardware video encoding |
-| P4 | comparison table across all four (first results above), with a hardware cost model (second machine pending) |
+| P4 | comparison table across all four (first results above), hardware cost model on two machines, crates.io 0.1.0 |
 | P5 | meshes (terrain, buildings, textured surfaces), Python bindings |
 
 ## 한국어
