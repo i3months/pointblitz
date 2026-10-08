@@ -22,15 +22,26 @@
 |---|---|---|---|---|---|
 | **B0** (0005, `mode=full`) | 이벤트마다 PLY 전체(`/data`) | 메인 스레드 `PLYLoader` | `Points` 통째로 교체 | 매 rAF | 지금까지의 비교(유지) |
 | **B1** (`mode=b1`) | PointBlitz 와 **같은** `/chunks/<seq>?have=` 스트림(GPU 배치 바이너리, 미리보기는 차분) | 없음 — 청크 바이트에 `Float32Array`/`Uint8Array` 뷰 | 청크마다 `Points` 를 덧붙임, 정밀은 새 세대가 다 오면(마지막 청크 표시) 교체 | 바뀔 때만 | **Rust·wgpu·wasm 대 three.js, 같은 구조** |
+| **B1-webgpu** (`mode=b1&renderer=webgpu`) | B1 과 같음 | 없음 | B1 과 같음 | 바뀔 때만 | **같은 API(WebGPU)에서 Rust·wgpu·wasm 대 three.js** — 되면 넣음 |
 | **B2** (`mode=b2`) | PLY. 미리보기는 새로 붙은 레코드만(`/data/<file>?have=`) | **Web Worker** 에서 해석(전송은 transfer, 복사 없음) | 미리보기는 덧붙임, 정밀은 교체 | 바뀔 때만 | **현실적인 as-is(SkyLens 식 증분)** |
 
-판정은 두 몫으로 나눠 표로 보인다: **구조가 준 몫 = B0 → B1**, **Rust·wgpu·wasm 이 준 몫 = B1 → PointBlitz web(WebGPU)**. B2 는 "SkyLens 식으로 잘 만든 three.js" 대비 값으로 따로 싣는다.
+판정은 몫으로 나눠 표로 보인다: **구조가 준 몫 = B0 → B1**, **Rust·wgpu·wasm 이 준 몫 = B1 → PointBlitz**. B1 은 three.js `WebGLRenderer`(WebGL2)라 B1 ÷ PointBlitz web(WebGPU) 에는 API(WebGPU 대 WebGL2)의 몫이 섞이므로, **같은 API 열을 꼭 함께 싣는다**: B1 ÷ PointBlitz webgl(둘 다 WebGL2), 그리고 B1-webgpu 가 되면 B1-webgpu ÷ PointBlitz web(둘 다 WebGPU). B2 는 "SkyLens 식으로 잘 만든 three.js" 대비 값으로 따로 싣는다.
+
+기준은 "가장 강한 합리적 three.js" 여야 한다(감독). 그래서 B1 의 올리기 방식은 가정하지 않고 스모크로 고른다(아래).
 
 ### B1 세부
 - 받기: PointBlitz web 과 같은 `fetch` 스트림 + 같은 `ChunkSplitter`(`web/chunks.js`), 같은 `have=<세대>.<점 수>` 규칙. 서버 쪽 변환(요청 때, 0026)도 같다.
-- 올리기: 청크 본문(80 B 뒤)을 해석 없이 `THREE.InterleavedBuffer` 두 개로 본다 — 위치는 `Float32Array`(보폭 4, 오프셋 0), 색은 `Uint8Array`(보폭 16, 오프셋 12, normalized). 청크 원점(f64)은 `Points.position` 으로.
-- **알려진 불리함(three.js 의 한계, 일부러 아님)**: three.js 의 `InterleavedBuffer` 는 타입 배열 하나만 받으므로 같은 바이트를 위치용·색용 두 번 GPU 에 올린다(점당 32 B, PointBlitz 는 16 B). 피하려면 CPU 에서 나눠 복사(= 해석에 가까운 일)하거나 three.js 를 우회해야 한다. 세 방법 중 가장 가벼운 것을 골랐다.
+- 올리기 — three.js 의 `InterleavedBuffer` 는 타입 배열 하나만 받으므로 청크(위치 f32×3 + 색 u8×4, 16 B)를 그대로 한 버퍼로 쓸 수 없다. 두 안을 **스모크로 비교해 빠른 쪽을 B1 으로** 정한다(진 쪽은 각주):
+  - (a) 청크 본문에 `InterleavedBuffer` 두 개 — 위치 `Float32Array`(보폭 4), 색 `Uint8Array`(보폭 16, 오프셋 12, normalized). CPU 복사 없음, GPU 에 같은 바이트를 두 번 올림(점당 32 B).
+  - (b) CPU 에서 위치 `Float32Array`(12 B)와 색 `Uint8Array`(4 B)로 나눠 복사한 뒤 일반 `BufferAttribute` 두 개. GPU 점당 16 B, 복사 한 번.
+  - 스모크: 같은 세션에서 cold·replay ×60 각 2 회씩 번갈아, `event_latency`(preview·refined p50)·`first_frame`·`mem_cpu`·메인 스레드 멈춤을 본다. 지연이 먼저, 같으면(5 % 안) 메모리가 적은 쪽. 결과와 이유는 구현 PR 에서 이 결정에 적는다.
+- 청크 원점(f64)은 `Points.position` 으로.
 - 정밀 교체: 새 세대의 청크는 숨긴 그룹에 쌓고, 마지막 청크가 오면 보이게 하고 앞 세대를 `dispose` 한다(PointBlitz 와 같은 원칙, 0022).
+
+### B1-webgpu 세부(되면 넣음)
+- three.js `WebGPURenderer`. WebGPU 의 점 프리미티브는 1 px 뿐이라(three.js `PointsNodeMaterial` 문서), 2 px 점은 `Sprite` + `PointsNodeMaterial` 인스턴싱(점마다 사각형)으로 그린다 — PointBlitz 도 WebGPU 에서 점마다 사각형을 그린다. 원판은 프래그먼트에서 반지름 밖을 버린다.
+- 받기·올리기·교체는 B1 과 같다(올리기는 B1 스모크에서 이긴 방식).
+- 안 되면(인스턴스 속성 제약, 화면이 B0 과 다름 등) 이유를 이 결정에 적고 열을 뺀다.
 
 ### B2 세부
 - 서버(`/data/<file>?have=<세대>.<점 수>`): `/chunks` 와 **같은 판단**(`chunks::plan`)으로 차분이 되면 PLY 헤더 + 앞 `점 수` 개 뒤의 레코드만 보낸다(`X-PB-Delivery: delta`, `X-PB-Skip`). 아니면 파일 전체. HTTP Range 를 두 번(헤더, 꼬리) 쓰는 것과 같은 바이트를 한 요청으로 보낸다.
@@ -42,9 +53,13 @@
 - 색: B1·B2 는 sRGB 바이트를 그대로 넘기므로 출력 색공간을 B0 과 같은 결과가 되게 맞춘다. **같은 시점 SSIM 으로 확인**한다(아래).
 - 그리기 측정(orbit)은 B0 과 같은 동기화 프레임(0020).
 
+### 해석 위치 비교(각주)
+같은 스냅샷 바이트를 두고, B2 의 워커 해석 시간(`parse_end − fetch_end`, 스냅샷별·합계)과 서버의 Rust 변환 시간(같은 스냅샷의 `/chunks` 읽기·청크 만들기, 마지막 스냅샷 약 19 ms)을 표 각주에 나란히 싣는다. "Rust 가 해석을 빨리 한 몫" 이 보이게 한다.
+
 ## 확인(측정 전에 끝냄)
 - 단위 시험: B2 서버 차분(헤더 + 꼬리)이 `/chunks` 차분과 같은 점 범위인지, B2 워커 해석이 Rust `ply.rs` 와 같은 값인지(스냅샷 1·3).
-- 그림: 고정 시점 8곳에서 B1·B2 캡처 대 B0 캡처 SSIM ≥ 0.999(같은 three.js 그리기라 거의 같아야 함), 대 PointBlitz web 은 B0 과 같은 수준(0.9919 근처).
+- 그림: 고정 시점 8곳에서 B1·B2 캡처 대 B0 캡처 SSIM ≥ 0.999(같은 three.js 그리기라 거의 같아야 함), 대 PointBlitz web 은 B0 과 같은 수준(0.9919 근처). B1-webgpu 는 대 PointBlitz web 0.99 이상이어야 넣는다.
+- B1 올리기 스모크((a)·(b)), 위 B1 세부.
 - 재생 동안 화면에 나온 점 수가 스냅샷 점 수와 같은지(`presented` 마크에 점 수).
 
 ## 대가
