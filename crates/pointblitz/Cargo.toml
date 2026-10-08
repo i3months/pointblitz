@@ -1,0 +1,24 @@
+[package]
+name = "pointblitz"
+description = "Point clouds at GPU speed: one Rust/wgpu core for browser (wasm), native and server-side video (re-exports pointblitz-core and pointblitz-io)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+readme.workspace = true
+homepage.workspace = true
+documentation = "https://docs.rs/pointblitz"
+keywords = ["point-cloud", "wgpu", "webgpu", "rendering", "ply"]
+categories = ["graphics", "rendering"]
+
+[dependencies]
+pointblitz-core.workspace = true
+pointblitz-io.workspace = true
+
+[features]
+# The replay-server client in pointblitz-io (std::net), off by default (decision 0003).
+client = ["pointblitz-io/client"]
+
+[lints]
+workspace = true

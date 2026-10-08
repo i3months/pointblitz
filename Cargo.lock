@@ -1555,8 +1555,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "pointblitz"
+version = "0.1.0"
+dependencies = [
+ "pointblitz-core",
+ "pointblitz-io",
+]
+
+[[package]]
 name = "pointblitz-bench"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "png",
  "pointblitz-core",
@@ -1566,7 +1574,7 @@ dependencies = [
 
 [[package]]
 name = "pointblitz-core"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "bytemuck",
  "glam 0.34.1",
@@ -1576,7 +1584,7 @@ dependencies = [
 
 [[package]]
 name = "pointblitz-io"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "serde_json",
  "skyrecon-core",
@@ -1584,7 +1592,7 @@ dependencies = [
 
 [[package]]
 name = "pointblitz-native"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "glam 0.34.1",
  "pointblitz-core",
@@ -1596,7 +1604,7 @@ dependencies = [
 
 [[package]]
 name = "pointblitz-server"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "glam 0.34.1",
  "libloading 0.9.0",
@@ -1610,7 +1618,7 @@ dependencies = [
 
 [[package]]
 name = "pointblitz-web"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "js-sys",
  "pointblitz-core",

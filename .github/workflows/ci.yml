@@ -28,6 +28,9 @@ jobs:
         run: cargo build --workspace --all-targets
       - name: test
         run: cargo test --workspace
+      - name: crates.io packages (decision 0044)
+        if: matrix.os == 'ubuntu-latest'
+        run: cargo publish --workspace --exclude pointblitz-bench --dry-run
       - name: wasm check
         run: cargo check --target wasm32-unknown-unknown -p pointblitz-io -p pointblitz-core -p pointblitz-web
 

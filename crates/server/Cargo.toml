@@ -6,7 +6,11 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-publish.workspace = true
+readme.workspace = true
+homepage.workspace = true
+documentation = "https://docs.rs/pointblitz-server"
+keywords = ["point-cloud", "nvenc", "video", "streaming"]
+categories = ["graphics", "multimedia::video", "rendering"]
 
 [dependencies]
 glam = "0.34"

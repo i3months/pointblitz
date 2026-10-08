@@ -3,6 +3,7 @@ resolver = "3"
 members = [
     "crates/io",
     "crates/core",
+    "crates/pointblitz",
     "crates/native",
     "crates/web",
     "crates/server",
@@ -10,16 +11,17 @@ members = [
 ]
 
 [workspace.package]
-version = "0.0.0"
+version = "0.1.0"
 edition = "2024"
 rust-version = "1.99"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/i3months/pointblitz"
-publish = false
+readme = "README.md"
+homepage = "https://github.com/i3months/pointblitz"
 
 [workspace.dependencies]
-pointblitz-io = { path = "crates/io" }
-pointblitz-core = { path = "crates/core" }
+pointblitz-io = { path = "crates/io", version = "0.1.0" }
+pointblitz-core = { path = "crates/core", version = "0.1.0" }
 
 [workspace.lints.rust]
 unsafe_code = "deny"

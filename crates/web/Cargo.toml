@@ -6,7 +6,11 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-publish.workspace = true
+readme.workspace = true
+homepage.workspace = true
+documentation = "https://docs.rs/pointblitz-web"
+keywords = ["point-cloud", "wasm", "webgpu", "webgl"]
+categories = ["graphics", "wasm", "rendering"]
 
 [lib]
 crate-type = ["cdylib", "rlib"]

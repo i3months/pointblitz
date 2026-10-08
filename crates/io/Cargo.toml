@@ -6,7 +6,13 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-publish.workspace = true
+readme.workspace = true
+homepage.workspace = true
+documentation = "https://docs.rs/pointblitz-io"
+keywords = ["point-cloud", "ply", "streaming", "parser"]
+categories = ["parser-implementations", "graphics"]
+# Needs the skyrecon dev-dependency (git, not on crates.io), which publishing drops.
+exclude = ["tests/skyrecon_roundtrip.rs"]
 
 [dependencies]
 # Only with the `client` feature: event and manifest JSON in the replay client.

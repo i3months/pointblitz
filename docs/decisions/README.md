@@ -47,5 +47,6 @@
 | [0041](0041-cpu-state-c4-power-throttling.md) | 측정 CPU 상태(C4)와 전원 조절 끄기(측정 프로세스만) | 승인 |
 | [0042](0042-server-tick-phase-lock.md) | 서버 영상: 쓰기 스레드 송신(기본), 서버 틱 위상 잠금(선택지 — 끔으로 확정) | 승인 |
 | [0043](0043-linux-nvenc-second-machine.md) | Linux NVENC 와 두 번째 장비(V100 서버) 측정 — 비용 모델 두 장비 보정 | 승인 |
+| [0044](0044-crates-io-release.md) | crates.io 배포(라이브러리 + 실행 파일, 0.1.0)와 릴리스 CI | 감독 검토 대기 |
 
 "제안" 상태는 작업자가 제안한 것이다. 감독 검토 또는 소유자 확인 뒤 "승인" 이 된다.
