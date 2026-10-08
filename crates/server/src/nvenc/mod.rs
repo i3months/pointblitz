@@ -1,6 +1,7 @@
 //! H.264 encoding with NVENC (P3.1, decision 0035).
 //!
-//! The driver's `nvEncodeAPI64.dll` and `nvcuda.dll` are loaded at run time, so building needs no
+//! The driver's NVENC and CUDA libraries are loaded at run time (`nvEncodeAPI64.dll` / `nvcuda.dll` on
+//! Windows, `libnvidia-encode.so.1` / `libcuda.so.1` on Linux — decisions 0035, 0043), so building needs no
 //! NVIDIA SDK or CUDA toolkit. NVENC runs on a CUDA context and owns its input buffers: each frame
 //! (tightly packed RGBA8 — the core's capture layout) is copied into a locked input buffer, encoded,
 //! and the bitstream is copied out as Annex B. Unsafe code (FFI) is allowed in this module only.
@@ -12,6 +13,15 @@ use libloading::Library;
 use std::ffi::c_void;
 use std::time::Instant;
 use sys::*;
+
+#[cfg(windows)]
+const CUDA_LIB: &str = "nvcuda.dll";
+#[cfg(windows)]
+const NVENC_LIB: &str = "nvEncodeAPI64.dll";
+#[cfg(target_os = "linux")]
+const CUDA_LIB: &str = "libcuda.so.1";
+#[cfg(target_os = "linux")]
+const NVENC_LIB: &str = "libnvidia-encode.so.1";
 
 /// Encoder settings. Bandwidth is not a constraint (INTENT principle 2): quality first.
 #[derive(Debug, Clone, Copy)]
@@ -65,7 +75,7 @@ impl Encoder {
     pub fn new(config: Config) -> Result<Self, String> {
         unsafe {
             // CUDA driver API: a context for NVENC on the first GPU.
-            let cuda = Library::new("nvcuda.dll").map_err(|e| format!("nvcuda.dll: {e}"))?;
+            let cuda = Library::new(CUDA_LIB).map_err(|e| format!("{CUDA_LIB}: {e}"))?;
             let cu_init: libloading::Symbol<unsafe extern "C" fn(u32) -> i32> =
                 cuda.get(b"cuInit\0").map_err(|e| e.to_string())?;
             let cu_device_get: libloading::Symbol<unsafe extern "C" fn(*mut i32, i32) -> i32> =
@@ -87,7 +97,7 @@ impl Encoder {
             if r != 0 {
                 return Err(format!("cuCtxCreate: {r}"));
             }
-            let nvenc = match Library::new("nvEncodeAPI64.dll") {
+            let nvenc = match Library::new(NVENC_LIB) {
                 Ok(l) => l,
                 Err(e) => {
                     if let Ok(destroy) =
@@ -95,7 +105,7 @@ impl Encoder {
                     {
                         let _ = destroy(cuda_ctx);
                     }
-                    return Err(format!("nvEncodeAPI64.dll: {e}"));
+                    return Err(format!("{NVENC_LIB}: {e}"));
                 }
             };
             // From here on `enc` owns everything created so far: an early return drops it and
