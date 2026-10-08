@@ -336,3 +336,17 @@ impl Drop for Encoder {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::sys::*;
+
+    /// The vendored Windows bindings are used on Linux too (decision 0043): the two structs whose
+    /// fields were Windows `long` types must keep the 32-bit layout of NVIDIA's header on both.
+    #[test]
+    fn layouts_match_the_header_on_every_os() {
+        assert_eq!(std::mem::size_of::<GUID>(), 16);
+        assert_eq!(std::mem::size_of::<NVENC_RECT>(), 16);
+        assert_eq!(std::mem::align_of::<GUID>(), 4);
+    }
+}
