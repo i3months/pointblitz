@@ -17,7 +17,7 @@
 | 그리기(1 프레임) | 모든 그리는 쪽 | 2.50 M 점 × 1920×1080 | GPU 정점·래스터 처리량 | 1.37 ms(native, 동기화 분리) | 1.83 G점/s |
 | 영상 인코딩 | server video | 1920×1080 프레임 | NVENC | 2.8 ms(서버 혼자) / 5.7 ms(같은 GPU 를 나눌 때) | — |
 | 영상 디코딩 | 브라우저 | 1920×1080 프레임 | 하드웨어 디코더 | 0.4 ms | — |
-| 영상 전송 | server video → 브라우저 | 정지 ≈ 0, 회전 중 약 68 Mbps(QP 18) | 네트워크 | — | — |
+| 영상 전송 | server video → 브라우저 | 정지 프레임 p50 0.2 KiB, 스냅샷 교체 프레임 p50 13.9 KiB·최대 171.0 KiB(결정 0040 실측), 회전 중 약 75 Mbps(QP 18; P3.4 orbit 113.0 MB / 12 s, P3.1 과 같음) | 네트워크 | — | — |
 
 그리기 1.37 ms 에서 정점 데이터는 40 MB 를 읽는다(약 29 GB/s) — RTX 4070 의 메모리 대역폭(504 GB/s)보다 훨씬 작으므로 메모리가 아니라 **정점 처리·래스터 처리량**이 한계다. 다른 GPU 추정은 이 처리량(대략 FP32 연산 성능에 비례)으로 비례시킨다(V100 보정으로 확인할 것).
 
@@ -32,22 +32,26 @@
 
 네트워크 외의 항은 1 절의 이 PC 값이다. 네트워크 항만 바꾼 **추정**이다(측정 아님).
 
+server video 의 네트워크 항은 스냅샷을 처음 보여 주는 프레임 하나다. 2026-10-08 replay ×60 실측(immediate 3 회, 41 개, `bench/video/frame-bytes.mjs`): p50 13.9 KiB, 최대 171.0 KiB. 표는 최대 크기로 계산했다(1 Gbps 1.4 ms, 100 Mbps 14 ms, 20 Mbps 70 ms).
+
 | 마지막 스냅샷(refined, 전체) 반영 | 루프백(실측) | 1 Gbps | 100 Mbps | 20 Mbps |
 |---|---:|---:|---:|---:|
 | three.js(PLY 67.6 MB) | 909 ms | 약 1.4 s | 약 6.2 s | 약 28 s |
 | PointBlitz native·browser(청크 40.0 MB) | 167–187 ms | 약 0.35 s | 약 3.2 s | 약 16 s |
-| server video(프레임만) | 175 ms | 약 0.18 s | 약 0.18 s | 약 0.2 s |
+| server video(교체 프레임, 실측 최대 171 KiB) | 175 ms | 약 0.18 s | 약 0.19 s | 약 0.25 s |
 
-| preview(새 점만) 반영 | 루프백(실측) | 1 Gbps | 100 Mbps | 20 Mbps |
+기준: ×60 replay 의 preview 반영 **p50**. preview 7 회 중 가운데는 `preview_3`(PLY 33.4 MB, 새 점 약 4.5 만 = 차분 약 0.71 MB)이므로, 네트워크 항도 이 스냅샷의 바이트로 계산한다(실측에서 루프백 전송 몫을 빼고 대역폭별 전송을 더함).
+
+| preview(새 점만) 반영, p50 | 루프백(실측) | 1 Gbps | 100 Mbps | 20 Mbps |
 |---|---:|---:|---:|---:|
-| three.js(PLY 전체, 마지막 preview 65.5 MB) | 456 ms(×60 p50) | 약 1.3 s | 약 6.0 s | 약 27 s |
-| PointBlitz native·browser(차분 0.35–0.87 MB) | 20–27 ms | 약 25–30 ms | 약 50–90 ms | 약 0.2–0.4 s |
+| three.js(PLY 전체 33.4 MB) | 456 ms | 약 0.66 s | 약 3.1 s | 약 14 s |
+| PointBlitz native·browser(차분 약 0.71 MB) | 20–27 ms | 약 25–30 ms | 약 75–85 ms | 약 0.3 s |
 | server video | 15 ms | 약 15–20 ms | 약 20 ms | 약 20–30 ms |
 
 | 회전·탐색 중 | 1 Gbps | 100 Mbps | 20 Mbps |
 |---|---|---|---|
 | 클라이언트 렌더(native·browser) | 받을 것 없음(로컬 GPU) | 같음 | 같음 |
-| server video(QP 18, 약 68 Mbps) | 여유 | 겨우 들어감 | **부족** — QP 를 올려(화질↓) 비트레이트를 낮춰야 함(P3.1: QP 28 은 36 Mbps, SSIM 0.988) |
+| server video(QP 18, 약 75 Mbps) | 여유 | 겨우 들어감 | **부족** — QP 를 올려(화질↓) 비트레이트를 낮춰야 함(P3.1: QP 28 은 36 Mbps, SSIM 0.988) |
 
 **읽는 법**
 - 대역폭이 크면(같은 LAN·데이터센터) 세 방식 모두 빠르고, 차이는 해석(three.js)과 그리기 위치다.
