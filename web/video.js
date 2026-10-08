@@ -13,6 +13,11 @@
 const params = new URLSearchParams(location.search);
 const url = params.get('ws') ?? 'ws://127.0.0.1:8720';
 const sendInputs = params.get('inputs') === '1';
+// Decision 0039: 'buffer' (default) draws one queued frame per display cycle with one frame of
+// slack, so the phase between the server tick and vsync no longer shows as empty/double cycles;
+// 'immediate' draws each frame as it is decoded (the earlier behaviour).
+const pacing = params.get('pacing') === 'immediate' ? 'immediate' : 'buffer';
+const SLACK = 2; // frames queued before drawing starts (head + one spare); more are dropped oldest-first
 const pb = (window.__pb = {
   marks: [],
   frames: [],
@@ -24,6 +29,7 @@ const pb = (window.__pb = {
   frameTimes: [],
   cycleDraws: [],
   cycles: { total: 0, missed: 0 },
+  pacing: { mode: pacing, dropped: 0 },
   ready: false,
   done: false,
   view,
@@ -68,10 +74,28 @@ function codecFromSps(b) {
   return null;
 }
 
+const queue = [];
+let primed = false;
 function onFrame(frame) {
   const meta = metaByFrame.get(frame.timestamp);
   if (meta) pb.decodeMs.push(performance.now() - meta.rx);
   metaByFrame.delete(frame.timestamp);
+  if (pacing === 'immediate') return present(frame, meta);
+  queue.push({ frame, meta });
+  while (queue.length > SLACK) {
+    queue.shift().frame.close();
+    pb.pacing.dropped++;
+  }
+}
+function presentQueued() {
+  if (!primed && queue.length >= SLACK) primed = true;
+  if (!primed) return;
+  const next = queue.shift();
+  // Ran dry: wait for the spare again so one late arrival does not leave an empty cycle.
+  if (!next) return void (primed = false);
+  present(next.frame, next.meta);
+}
+function present(frame, meta) {
   ctx.drawImage(frame, 0, 0, canvas.width, canvas.height);
   frame.close();
   const t = performance.now();
@@ -134,6 +158,7 @@ function cycle(t) {
   }
   drawnSinceCycle = false;
   drawnThisCycle = 0;
+  if (pacing === 'buffer') presentQueued();
   requestAnimationFrame(cycle);
 }
 
