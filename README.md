@@ -32,7 +32,7 @@ full-file downloads before the first frame, main-thread parsing, and re-uploadin
 
 What these numbers do and do not say:
 
-- **New data reaches the screen about 5–22× sooner** (refined and cold about 5–7×, preview 13–23×), because PointBlitz streams GPU-ready chunks, sends only new points for preview snapshots, and never parses on the main thread.
+- **New data reaches the screen about 5–23× sooner** (refined and cold about 5–7×, preview 13–23×), because PointBlitz streams GPU-ready chunks, sends only new points for preview snapshots, and never parses on the main thread.
 - **Drawing speed is on par, not faster.** Native frame time is within the target (the baseline's own values) with no margin. **Browser frame time misses the target**: the judged value synchronises with the GPU after every frame, and that round trip dominates. Synchronising only every 30 frames (a diagnostic run under the same rules, not the judged value), WebGPU draws a frame in 1.43 ms and native in 1.37 ms.
 - **WebGL2** also blocks the main thread once during a cold start (target: never); its cost is on the CPU side, in submitting GL work.
 - **Server video** meets every target, but 2 of 5 rotation runs dropped more than 1 % of display cycles (worst 6.32 %, median 0.40 %): the server ticks at exactly 60 Hz and the display runs slightly below 60 Hz, so the phase drifts through the refresh boundary. No frame is lost; one cycle shows two.
