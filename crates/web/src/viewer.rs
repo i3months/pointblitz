@@ -21,6 +21,12 @@ pub struct Viewer {
     offscreen: Option<(wgpu::Texture, wgpu::TextureView)>,
     /// One pixel of the last offscreen frame is copied here; mapping it waits for the GPU.
     readback: Option<wgpu::Buffer>,
+    /// Where the last `render_offscreen` spent its time, ms (P4.2): record, copy, finish, submit.
+    stages: [f64; 4],
+    /// Copy the first pixel of each offscreen frame for `readback_done` (on by default). On WebGL2 the
+    /// copy makes the GL work run inside submit; without it the same work runs at the page's
+    /// readPixels and frames got slower (P4.2: p50 4.2 → 6.2 ms), so it stays on there too.
+    readback_copy: bool,
 }
 
 fn err(what: &str, e: impl std::fmt::Display) -> JsValue {
@@ -139,6 +145,8 @@ impl Viewer {
             adapter,
             offscreen: None,
             readback: None,
+            stages: [0.0; 4],
+            readback_copy: true,
         })
     }
 
@@ -202,6 +210,12 @@ impl Viewer {
                 mapped_at_creation: false,
             })
         });
+        let now = || {
+            web_sys::window()
+                .and_then(|w| w.performance())
+                .map_or(0.0, |p| p.now())
+        };
+        let t0 = now();
         let mut enc = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
@@ -215,23 +229,42 @@ impl Viewer {
             &self.camera,
             &self.scene,
         );
-        enc.copy_texture_to_buffer(
-            texture.as_image_copy(),
-            wgpu::TexelCopyBufferInfo {
-                buffer: readback,
-                layout: wgpu::TexelCopyBufferLayout {
-                    offset: 0,
-                    bytes_per_row: Some(256),
-                    rows_per_image: Some(1),
+        let t1 = now();
+        if self.readback_copy {
+            enc.copy_texture_to_buffer(
+                texture.as_image_copy(),
+                wgpu::TexelCopyBufferInfo {
+                    buffer: readback,
+                    layout: wgpu::TexelCopyBufferLayout {
+                        offset: 0,
+                        bytes_per_row: Some(256),
+                        rows_per_image: Some(1),
+                    },
                 },
-            },
-            wgpu::Extent3d {
-                width: 1,
-                height: 1,
-                depth_or_array_layers: 1,
-            },
-        );
-        self.queue.submit([enc.finish()]);
+                wgpu::Extent3d {
+                    width: 1,
+                    height: 1,
+                    depth_or_array_layers: 1,
+                },
+            );
+        }
+        let t2 = now();
+        let commands = enc.finish();
+        let t3 = now();
+        self.queue.submit([commands]);
+        let t4 = now();
+        self.stages = [t1 - t0, t2 - t1, t3 - t2, t4 - t3];
+    }
+
+    /// A/B switch for the readback copy (P4.2).
+    pub fn set_readback_copy(&mut self, on: bool) {
+        self.readback_copy = on;
+    }
+
+    /// Stage times of the last `render_offscreen`, ms: record (pass + buffer writes), copy, finish,
+    /// submit (P4.2 diagnosis). On WebGL2 the GL calls happen at submit.
+    pub fn last_stages(&self) -> Vec<f64> {
+        self.stages.to_vec()
     }
 
     /// Resolves when the last offscreen frame is finished: maps the one-pixel readback, which the
