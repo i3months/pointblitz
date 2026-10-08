@@ -82,6 +82,17 @@ pub fn parse_phase(text: &str) -> Option<(f64, f64)> {
     Some((v["err_ms"].as_f64()?, v["period_ms"].as_f64()?))
 }
 
+/// The orbit scenario by time, not by frame (decision 0045): wait 0.5 s after the last snapshot,
+/// then 12 s at 90° per second → (wait frames, orbit frames, degrees per frame). At 60 fps this is
+/// the 30 / 720 / 1.5° every earlier measurement used; at 120 fps the same path in the same time.
+pub fn orbit_plan(fps: u32) -> (u64, u64, f64) {
+    (
+        u64::from(fps) / 2,
+        12 * u64::from(fps),
+        90.0 / f64::from(fps),
+    )
+}
+
 /// Rotates `v` about unit axis `k` by `angle` (Rodrigues).
 fn rotate(v: DVec3, k: DVec3, angle: f64) -> DVec3 {
     let (s, c) = angle.sin_cos();
@@ -378,9 +389,7 @@ pub fn run(args: &[String]) -> Result<(), String> {
     let mut late = 0u64;
     let mut log = String::new();
     let (mut render_all, mut encode_all, mut over_budget) = (Vec::new(), Vec::new(), 0u64);
-    const ORBIT_WAIT: u64 = 30;
-    const ORBIT_FRAMES: u64 = 720;
-    const ORBIT_STEP_DEG: f64 = 1.5;
+    let (orbit_wait, orbit_frames, orbit_step_deg) = orbit_plan(fps);
     let mut orbit_from: Option<u64> = None;
     let orbit_base = camera.clone();
     let ms_since = |t: Instant| t.duration_since(t0).as_secs_f64() * 1e3;
@@ -456,17 +465,17 @@ pub fn run(args: &[String]) -> Result<(), String> {
         }
         let phase = if orbit {
             if orbit_from.is_none() && ended_at.is_some() && newest_visible.is_some() {
-                orbit_from = Some(frame + ORBIT_WAIT);
+                orbit_from = Some(frame + orbit_wait);
             }
             match orbit_from {
-                Some(f0) if frame >= f0 && frame < f0 + ORBIT_FRAMES => {
-                    let k = (frame - f0) as f64 * ORBIT_STEP_DEG;
+                Some(f0) if frame >= f0 && frame < f0 + orbit_frames => {
+                    let k = (frame - f0) as f64 * orbit_step_deg;
                     let up = orbit_base.up.normalize();
                     camera.eye = orbit_base.target
                         + rotate(orbit_base.eye - orbit_base.target, up, k.to_radians());
                     "orbit"
                 }
-                Some(f0) if frame >= f0 + ORBIT_FRAMES => "done",
+                Some(f0) if frame >= f0 + orbit_frames => "done",
                 _ => "load",
             }
         } else {
@@ -512,7 +521,7 @@ pub fn run(args: &[String]) -> Result<(), String> {
         }
 
         let finished = if orbit {
-            orbit_from.is_some_and(|f0| frame >= f0 + ORBIT_FRAMES + 30)
+            orbit_from.is_some_and(|f0| frame >= f0 + orbit_frames + orbit_wait)
         } else {
             matches!((ended_at, exit_after_end), (Some(at), Some(secs)) if at.elapsed().as_secs_f64() >= secs)
         };
@@ -566,6 +575,14 @@ pub fn run(args: &[String]) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn orbit_plan_keeps_the_60_fps_scenario() {
+        assert_eq!(orbit_plan(60), (30, 720, 1.5));
+        let (w, n, step) = orbit_plan(120);
+        assert_eq!((w, n), (60, 1440));
+        assert!((step * n as f64 - 1080.0).abs() < 1e-9); // three turns either way
+    }
 
     #[test]
     fn parses_inputs() {
