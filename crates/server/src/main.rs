@@ -18,6 +18,8 @@ mod nvenc;
 #[cfg(windows)]
 mod encode_test;
 
+#[cfg_attr(not(windows), allow(dead_code))]
+mod phase;
 mod probe;
 #[cfg(windows)]
 mod serve;

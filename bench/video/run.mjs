@@ -3,7 +3,7 @@
 // usage: node bench/video/run.mjs --server http://127.0.0.1:<replay> --port <serve port>
 //                                 --scenario replay|cold|orbit [--speed 60] [--metrics <file.jsonl>]
 //                                 [--exe target/release/pointblitz-server.exe] [--log <server log>]
-//                                 [--raw <file.json>] [--pacing buffer|immediate|adaptive (decisions 0039, 0040)]
+//                                 [--raw <file.json>] [--pacing buffer|immediate|adaptive (decisions 0039, 0040)] [--phase-lock on|off (decision 0042)]
 //                                 [--timeout <s, default 300: fail a client that never finishes>]
 // Run from the repository root (serve reads bench/viewpoints/flight-01.json).
 //
@@ -33,6 +33,9 @@ const serveArgs = ['serve', '--replay', server, '--port', String(port), '--speed
 if (scenario === 'cold') serveArgs.push('--cold', '--exit-after-end', '2');
 else if (scenario === 'orbit') serveArgs.push('--orbit');
 else serveArgs.push('--exit-after-end', '2');
+// --phase-lock on|off (decision 0042); the server default applies when not given.
+if (args['phase-lock']) serveArgs.push('--phase-lock', args['phase-lock']);
+if (args.send) serveArgs.push('--send', args.send); // A/B of the send path (decision 0042)
 
 const serve = spawn(exe, serveArgs, { stdio: ['pipe', 'ignore', 'pipe'] });
 let serveErr = '';

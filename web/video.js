@@ -87,10 +87,34 @@ let spareUnused = 0; // consecutive draws that found the spare already there (ad
 let rafT = null;
 const awaitingScreen = [];
 const onScreen = (o) => (rafT != null ? (o.screen = rafT) : awaitingScreen.push(o));
+// Phase report (decision 0042): where decoded frames land in the display cycle, as the circular
+// mean of 30 frames; the server moves its tick so they land mid-cycle (φ = 0.5), away from the
+// refresh boundary. ?phase=0 turns the reports off.
+const reportPhase = params.get('phase') !== '0';
+const phaseSum = { c: 0, s: 0, n: 0 };
+pb.phaseReports = [];
+function notePhase(t) {
+  const f = pb.frames;
+  if (!reportPhase || f.length < 10) return;
+  const d = [];
+  for (let i = Math.max(1, f.length - 60); i < f.length; i++) d.push(f[i] - f[i - 1]);
+  d.sort((a, b) => a - b);
+  const period = d[d.length >> 1];
+  const phi = (((t - f[f.length - 1]) / period) % 1 + 1) % 1;
+  phaseSum.c += Math.cos(2 * Math.PI * phi);
+  phaseSum.s += Math.sin(2 * Math.PI * phi);
+  if (++phaseSum.n < 30) return;
+  const mean = ((Math.atan2(phaseSum.s, phaseSum.c) / (2 * Math.PI)) % 1 + 1) % 1;
+  const err = (0.5 - mean) * period;
+  phaseSum.c = phaseSum.s = phaseSum.n = 0;
+  pb.phaseReports.push([t, mean, err]);
+  if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'phase', err_ms: err, period_ms: period }));
+}
 function onFrame(frame) {
   const meta = metaByFrame.get(frame.timestamp);
   if (meta) pb.decodeMs.push(performance.now() - meta.rx);
   metaByFrame.delete(frame.timestamp);
+  notePhase(performance.now());
   if (pacing === 'immediate') return present(frame, meta);
   queue.push({ frame, meta });
   while (queue.length > SLACK) {

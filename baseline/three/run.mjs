@@ -74,6 +74,7 @@ const raw = await page.evaluate(() => ({
   stages: window.__pb.stages,
   frameTimes: window.__pb.frameTimes,
   cycleDraws: window.__pb.cycleDraws,
+  phaseReports: window.__pb.phaseReports,
   pacing: window.__pb.pacing,
 }));
 const renderer = await page.evaluate(() => {
