@@ -222,9 +222,11 @@ PointBlitz 를 재기 전에 정했다. 근거·이유: [docs/ops/reviews/p0-7-t
 | cold 마지막 스냅샷 `event_latency` | ≤ 300 ms | native · browser | 882.2 ms |
 | `main_thread_block` | 0 회(`replay` ×60 · `cold`) | browser | 16 회 · 6,305 ms |
 | `mem_cpu` 최대(`replay` ×60) | **기록만**(2026-10-08 소유자: 메모리 제약 없음) — 이전 감독 값 ≤ 300 MB | browser 렌더러 / native 프로세스, OS 최대 commit(결정 0032) | 860.7 MB(이전 방법) |
-| `frame_time_total` p50 / p95 / p99(`orbit`, 2.5 M 점) | 각각 기준 방식 이하 | native · browser | 2.8 / 3.8 / 6.0 ms |
+| `frame_time_total` p50 / p95 / p99(`orbit`, 2.5 M 점) | 각각 기준 방식 이하 | native · browser | **1.7 / 1.9 / 2.0 ms**(2026-10-08 재측정 2: C1–C4 준수, 밉맵 끔 — 결정 0025·0040·0041). 이전 2.8 / 3.8 / 6.0 ms(P0.6: C3 범위 밖 11/14, C4 미상) |
 
 - `first_frame` 은 보고만 한다.
+- 판정은 측정 유효성 규칙 C1–C4(결정 0038·0040·0041)를 모두 지킨 같은 세션 측정으로 한다. 그 전 단계의 판정은 "C4 미상" 으로 문서에 남긴다(docs/bench/validity-audit.md).
+- 위 표의 기준 방식 지연·`main_thread_block` 값은 P0.6(C4 미상)이다. 목표가 절대값이라 판정에 쓰이지 않으며, C1–C4 재측정 2 값은 preview / refined 478.4 / 625.5 ms, cold 943.0 ms 다(docs/bench/baseline-three.md).
 - `frame_time` 비교는 두 구현의 점 모양이 같을 때만 유효하다(결정 0025).
 - 저사양 GPU 는 비용 모델(결정 0011)로 추정해 보고한다.
 
@@ -275,3 +277,4 @@ PointBlitz 를 재기 전에 정했다. 근거·이유: [docs/ops/reviews/p0-7-t
 | 2026-10-07 | §7.1 목표 수치(P0.7) 추가 | 감독(소유자 위임) |
 | 2026-10-08 | §7.1 `mem_cpu` 를 목표에서 기록만으로(이전 목표 ≤ 300 MB 는 표에 남김). 이유: 메모리는 대역폭처럼 제약이 아니다. INTENT 원칙 2 에 메모리 추가. 참고: P1.5 native `mem_cpu` 미달(348.6 MB, 이전 방법)과 결정 0032 의 재측정 필요가 알려진 뒤의 변경이다 | 프로젝트 소유자(채팅) |
 | 2026-10-08 | §7.1 서버 영상(P3) 목표 추가(제안 그대로, 화질은 native 캡처 대비), 프레임 빠짐 정의 | 프로젝트 소유자(채팅) |
+| 2026-10-08 | §7.1 `frame_time_total` 기준값 정정 2.8 / 3.8 / 6.0 → 1.7 / 1.9 / 2.0 ms(기준 방식 재측정 2, C1–C4 준수, 밉맵 끔). 이유: 기준 측정 유효성 정정 — P0.6 원 측정은 C3 범위 밖 11/14·C4 미상. 판정 이력은 문서에 보존(docs/bench/baseline-three.md, validity-audit.md), 판정은 P4.6 C1–C4 전체 비교에서 새 기준으로. §7.1 에 판정 유효성(C1–C4) 문구 추가 | 감독(소유자 위임 2026-10-08) — 기준 측정 유효성 정정 |
