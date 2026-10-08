@@ -6,7 +6,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-publish.workspace = true
+publish = false # measurement tool, used inside this repository only (decision 0044)
 
 [dependencies]
 png = "0.18"

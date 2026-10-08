@@ -39,6 +39,15 @@ fi
 step test
 cargo test --workspace
 
+step "crates.io packages (decision 0044): license copies match the root, every published crate packages and builds"
+for d in crates/*/; do
+  if grep -q "^publish = false" "$d/Cargo.toml"; then continue; fi
+  for f in LICENSE-MIT LICENSE-APACHE; do
+    cmp -s "$f" "$d$f" || { echo "error: $d$f differs from ./$f (copy the root file)" >&2; exit 1; }
+  done
+done
+cargo publish --workspace --exclude pointblitz-bench --dry-run --allow-dirty --quiet
+
 step "browser client unit tests"
 node --test web/chunks.test.mjs
 

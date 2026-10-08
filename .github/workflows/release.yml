@@ -1,0 +1,34 @@
+name: release
+
+# crates.io release (decision 0044): push a tag v<version> (for example v0.1.0) whose version equals
+# the workspace version. Needs the repository secret CARGO_REGISTRY_TOKEN (a crates.io API token
+# with publish-new and publish-update scopes), which the owner adds; nothing else holds it.
+
+on:
+  push:
+    tags: ['v*']
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install toolchain from rust-toolchain.toml
+        run: rustup show active-toolchain || rustup toolchain install
+      - name: tag matches the workspace version
+        run: |
+          v=$(grep -m1 '^version = ' Cargo.toml | sed 's/version = "\(.*\)"/\1/')
+          [ "${GITHUB_REF_NAME}" = "v$v" ] || { echo "tag ${GITHUB_REF_NAME} != workspace version v$v"; exit 1; }
+      - name: fmt
+        run: cargo fmt --all --check
+      - name: clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: test
+        run: cargo test --workspace
+      - name: publish (cargo orders the crates by their dependencies)
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: cargo publish --workspace --exclude pointblitz-bench
