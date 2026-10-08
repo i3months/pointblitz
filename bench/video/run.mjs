@@ -35,6 +35,7 @@ else if (scenario === 'orbit') serveArgs.push('--orbit');
 else serveArgs.push('--exit-after-end', '2');
 // --phase-lock on|off (decision 0042); the server default applies when not given.
 if (args['phase-lock']) serveArgs.push('--phase-lock', args['phase-lock']);
+if (args.fps) serveArgs.push('--fps', String(args.fps)); // frame rate (decision 0045); the server default is 60
 if (args.send) serveArgs.push('--send', args.send); // A/B of the send path (decision 0042)
 
 const serve = spawn(exe, serveArgs, { stdio: ['pipe', 'ignore', 'pipe'] });
