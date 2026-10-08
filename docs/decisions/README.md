@@ -8,7 +8,7 @@
 | [0002](0002-gpu-api-wgpu.md) | GPU 추상화: wgpu | 승인 |
 | [0003](0003-one-core-three-targets.md) | 렌더 코어 하나, 실행 위치 셋 | 승인 |
 | [0004](0004-skyrecon-point-clouds-only.md) | 입력은 skyrecon 점군만 | 승인 |
-| [0005](0005-baseline-definition.md) | 비교 기준(기존 방식)의 정의 | 승인 |
+| [0005](0005-baseline-definition.md) | 비교 기준(기존 방식)의 정의 | 대체됨(0048) |
 | [0006](0006-opaque-points-no-sort.md) | 불투명 점 + 깊이 테스트, 정렬 없음 | 승인 |
 | [0007](0007-point-size-shape.md) | 점 모양·크기·색 | 승인 |
 | [0008](0008-gpu-ready-uncompressed-chunks.md) | 클라이언트 형식: GPU 레이아웃 무압축 청크 | 승인 |
@@ -51,5 +51,6 @@
 | [0045](0045-server-video-120fps.md) | 서버 영상 120 fps(선택지, 기본 60 fps) | 승인(선택지, 기본 60 fps) |
 | [0046](0046-unreachable-dev-dependency.md) | 도달할 수 없는 git 의존(skyrecon)을 워크스페이스에서 뺌, 캐시 없는 의존 확인 | 승인 |
 | [0047](0047-resumable-release.md) | 릴리스를 이어서 올릴 수 있게(이미 있는 버전 건너뜀, 태그 지정 수동 실행) | 승인 |
+| [0048](0048-incremental-baselines.md) | 증분 three.js 기준 B1(같은 청크 경로)·B2(SkyLens 식 증분, 워커 해석), B0(0005)는 비교용 | 감독 검토 대기 |
 
 "제안" 상태는 작업자가 제안한 것이다. 감독 검토 또는 소유자 확인 뒤 "승인" 이 된다.
