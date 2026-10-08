@@ -52,6 +52,6 @@
 | [0046](0046-unreachable-dev-dependency.md) | 도달할 수 없는 git 의존(skyrecon)을 워크스페이스에서 뺌, 캐시 없는 의존 확인 | 승인 |
 | [0047](0047-resumable-release.md) | 릴리스를 이어서 올릴 수 있게(이미 있는 버전 건너뜀, 태그 지정 수동 실행) | 승인 |
 | [0048](0048-incremental-baselines.md) | 증분 three.js 기준 B1(같은 청크 경로)·B2(SkyLens 식 증분, 워커 해석), B0(0005)는 비교용 | 승인 |
-| [0049](0049-remove-remaining-ambiguity.md) | 남은 모호함 셋: webgl 동기화 고침, 그리기 판정값 batch=30, 지연 몫의 부트스트랩 95 % 구간 | 감독 검토 대기 |
+| [0049](0049-remove-remaining-ambiguity.md) | 남은 모호함 셋: webgl 동기화 고침, 그리기 판정값 batch=30, 지연 몫의 부트스트랩 95 % 구간 | 승인 |
 
 "제안" 상태는 작업자가 제안한 것이다. 감독 검토 또는 소유자 확인 뒤 "승인" 이 된다.
