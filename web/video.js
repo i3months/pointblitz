@@ -88,14 +88,18 @@ let rafT = null;
 const awaitingScreen = [];
 const onScreen = (o) => (rafT != null ? (o.screen = rafT) : awaitingScreen.push(o));
 // Phase report (decision 0042): where decoded frames land in the display cycle, as the circular
-// mean of 30 frames; the server moves its tick so they land mid-cycle (φ = 0.5), away from the
-// refresh boundary. ?phase=0 turns the reports off.
+// mean of 30 frames (the first after 10); with `serve --phase-lock on` the server moves its tick so
+// they land at φ = 0.65 — a frame drawn outside rAF shows at the next rendering update, so this is
+// ~6 ms before it, clear of the boundary. Frames that show a new snapshot (a swap: the server is late)
+// and decodes over 3 ms are left out so a passing delay does not move the tick. ?phase=0: no reports.
 const reportPhase = params.get('phase') !== '0';
-const phaseSum = { c: 0, s: 0, n: 0 };
+const PHASE_TARGET = 0.65;
+const phaseSum = { c: 0, s: 0, n: 0, reports: 0 };
 pb.phaseReports = [];
-function notePhase(t) {
+function notePhase(t, meta) {
   const f = pb.frames;
   if (!reportPhase || f.length < 10) return;
+  if (!meta || meta.visible.length || t - meta.rx > 3) return;
   const d = [];
   for (let i = Math.max(1, f.length - 60); i < f.length; i++) d.push(f[i] - f[i - 1]);
   d.sort((a, b) => a - b);
@@ -103,9 +107,12 @@ function notePhase(t) {
   const phi = (((t - f[f.length - 1]) / period) % 1 + 1) % 1;
   phaseSum.c += Math.cos(2 * Math.PI * phi);
   phaseSum.s += Math.sin(2 * Math.PI * phi);
-  if (++phaseSum.n < 30) return;
+  if (++phaseSum.n < (phaseSum.reports ? 30 : 10)) return;
+  phaseSum.reports++;
   const mean = ((Math.atan2(phaseSum.s, phaseSum.c) / (2 * Math.PI)) % 1 + 1) % 1;
-  const err = (0.5 - mean) * period;
+  // Not wrapped: φ̄ is in [0, 1), so moving by (target − φ̄) never crosses the refresh boundary (φ = 0/1),
+  // where frames would fall into the neighbouring cycle on the way.
+  const err = (PHASE_TARGET - mean) * period;
   phaseSum.c = phaseSum.s = phaseSum.n = 0;
   pb.phaseReports.push([t, mean, err]);
   if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'phase', err_ms: err, period_ms: period }));
@@ -114,7 +121,7 @@ function onFrame(frame) {
   const meta = metaByFrame.get(frame.timestamp);
   if (meta) pb.decodeMs.push(performance.now() - meta.rx);
   metaByFrame.delete(frame.timestamp);
-  notePhase(performance.now());
+  notePhase(performance.now(), meta);
   if (pacing === 'immediate') return present(frame, meta);
   queue.push({ frame, meta });
   while (queue.length > SLACK) {

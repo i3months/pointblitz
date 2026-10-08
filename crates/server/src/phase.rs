@@ -2,12 +2,16 @@
 //! the middle of its display cycle, away from the refresh boundary where a little arrival jitter
 //! turns into an empty cycle next to a double one (diagnostics P4.3).
 //!
-//! The client reports `err_ms = (0.5 − φ̄) × P` every 30 frames (φ̄: circular mean of where decoded
-//! frames land in its display cycle of period P). Each report adds a PI correction to a pending
+//! The client reports `err_ms = (0.65 − φ̄) × P` (first after 10 frames, then every 30; φ̄: circular
+//! mean of where decoded frames land in its display cycle of period P; 0.65 = before the next
+//! rendering update with ~6 ms to spare, decision 0042 tuning). Each report adds a PI correction to a pending
 //! shift, which is paid out at most `MAX_STEP_MS` per tick (positive = the next tick later).
 //! Times are plain milliseconds so the loop can be simulated in tests.
 
 const KP: f64 = 0.25;
+/// Gain of the first `ACQUIRE_REPORTS` reports, to pull the phase in quickly after connecting.
+const KP_ACQUIRE: f64 = 0.75;
+const ACQUIRE_REPORTS: u32 = 3;
 const KI: f64 = 0.05;
 const MAX_STEP_MS: f64 = 1.0;
 const MAX_INTEGRAL_MS: f64 = 4.0;
@@ -18,6 +22,7 @@ pub struct PhaseLock {
     pending: f64,
     integral: f64,
     last_report: Option<f64>,
+    reports: u32,
 }
 
 /// What one report did, for the server log.
@@ -29,13 +34,20 @@ pub struct Report {
 }
 
 impl PhaseLock {
-    /// A client report. Rejects non-finite errors and errors beyond half a period (+0.5 ms).
+    /// A client report. Rejects non-finite errors and errors beyond a period (+0.5 ms): the error is
+    /// not wrapped, so the correction moves the phase away from the refresh boundary, never across it.
     pub fn report(&mut self, err_ms: f64, period_ms: f64, now_ms: f64) -> Option<Report> {
-        if !err_ms.is_finite() || !period_ms.is_finite() || err_ms.abs() > period_ms / 2.0 + 0.5 {
+        if !err_ms.is_finite() || !period_ms.is_finite() || err_ms.abs() > period_ms + 0.5 {
             return None;
         }
         self.integral = (self.integral + KI * err_ms).clamp(-MAX_INTEGRAL_MS, MAX_INTEGRAL_MS);
-        let added = KP * err_ms + self.integral;
+        let kp = if self.reports < ACQUIRE_REPORTS {
+            KP_ACQUIRE
+        } else {
+            KP
+        };
+        self.reports += 1;
+        let added = kp * err_ms + self.integral;
         self.pending += added;
         self.last_report = Some(now_ms);
         Some(Report {
@@ -76,11 +88,14 @@ mod tests {
 
     struct Outcome {
         mean_phase: f64,
+        settle_frames: usize,
         near_edge: f64,
         min_interval: f64,
         max_interval: f64,
         shift_sd: f64,
     }
+
+    const TARGET: f64 = 0.65;
 
     /// Server ticks at 60 Hz with the lock, frames arrive 10 ms after their tick ± `jitter`,
     /// the display runs at `display_hz` starting at `display_offset`; reports every 30 frames.
@@ -101,9 +116,9 @@ mod tests {
             let a = std::f64::consts::TAU * phi;
             c += a.cos();
             s += a.sin();
-            if (n + 1) % 30 == 0 {
+            if n + 1 == 10 || (n + 1 > 10 && (n + 1 - 10) % 30 == 0) {
                 let mean = (s.atan2(c) / std::f64::consts::TAU).rem_euclid(1.0);
-                lock.report((0.5 - mean) * period, period, t);
+                lock.report((TARGET - mean) * period, period, t);
                 (c, s) = (0.0, 0.0);
             }
             let shift = lock.tick_shift(t);
@@ -111,6 +126,11 @@ mod tests {
             intervals.push(tick + shift);
             t += tick + shift;
         }
+        // Settled: the first frame after which no frame lands within 0.1 of the boundary (φ = 0 / 1, where the risk is — decision 0042 tuning).
+        let settle_frames = phases
+            .iter()
+            .rposition(|p| *p < 0.1 || *p > 0.9)
+            .map_or(0, |i| i + 1);
         let late = &phases[frames / 2..];
         let (lc, ls) = late.iter().fold((0.0, 0.0), |(c, s), p| {
             let a = std::f64::consts::TAU * p;
@@ -123,7 +143,8 @@ mod tests {
         let iv = &intervals[frames / 2..];
         Outcome {
             mean_phase: (ls.atan2(lc) / std::f64::consts::TAU).rem_euclid(1.0),
-            near_edge: late.iter().filter(|p| **p < 0.15 || **p > 0.85).count() as f64
+            settle_frames,
+            near_edge: late.iter().filter(|p| **p < 0.1 || **p > 0.9).count() as f64
                 / late.len() as f64,
             min_interval: iv.iter().copied().fold(f64::INFINITY, f64::min),
             max_interval: iv.iter().copied().fold(f64::NEG_INFINITY, f64::max),
@@ -139,15 +160,25 @@ mod tests {
                 let o = simulate(display_hz, offset, 2.5, 6000);
                 let what = format!("{display_hz} Hz, offset {offset} ms");
                 eprintln!(
-                    "{what}: phase {:.3}, near edge {:.4}, interval {:.2}–{:.2} ms, shift sd {:.3}",
-                    o.mean_phase, o.near_edge, o.min_interval, o.max_interval, o.shift_sd
+                    "{what}: phase {:.3}, settled after {} frames, near edge {:.4}, interval {:.2}–{:.2} ms, shift sd {:.3}",
+                    o.mean_phase,
+                    o.settle_frames,
+                    o.near_edge,
+                    o.min_interval,
+                    o.max_interval,
+                    o.shift_sd
                 );
                 assert!(
-                    (o.mean_phase - 0.5).abs() < 0.1,
+                    (o.mean_phase - TARGET).abs() < 0.1,
                     "{what}: mean phase {}",
                     o.mean_phase
                 );
                 assert!(o.near_edge < 0.01, "{what}: {} near the edge", o.near_edge);
+                assert!(
+                    o.settle_frames < 60,
+                    "{what}: settled after {} frames",
+                    o.settle_frames
+                );
                 assert!(
                     o.min_interval >= 15.66 && o.max_interval <= 17.67,
                     "{what}: tick interval {}–{}",
@@ -163,7 +194,7 @@ mod tests {
     fn rejects_bad_reports_and_lets_go_when_reports_stop() {
         let mut lock = PhaseLock::default();
         assert!(lock.report(f64::NAN, 16.7, 0.0).is_none());
-        assert!(lock.report(20.0, 16.7, 0.0).is_none());
+        assert!(lock.report(20.0, 16.7, 0.0).is_none()); // beyond a period
         assert_eq!(lock.tick_shift(10.0), 0.0); // no accepted report yet
         assert!(lock.report(8.0, 16.7, 100.0).is_some());
         assert_eq!(lock.tick_shift(116.7), 1.0); // capped per tick
