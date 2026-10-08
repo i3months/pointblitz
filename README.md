@@ -46,6 +46,40 @@ from 150 k to 2.5 M points (67.5 MB) over 14 snapshots, 530 MB in total.
 Preview snapshots only add points; refined snapshots recompute the whole cloud.
 PointBlitz appends what is new, swaps whole generations without a blank frame, and never parses on the main thread.
 
+## Try it
+
+PointBlitz replays a directory of skyrecon snapshot PLYs (not included in this repository) as if a flight were
+streaming them. You need Rust (see `rust-toolchain.toml`), and for the browser target
+`cargo install wasm-bindgen-cli --version 0.2.129 --locked`.
+
+```sh
+cargo build --release -p pointblitz-bench -p pointblitz-native -p pointblitz-server
+bash web/build.sh                # browser module (WebGPU + WebGL2 fallback); `bash web/build.sh webgpu` for WebGPU only
+
+# 1. replay server: serves the snapshots, the chunk stream and the demo pages (127.0.0.1 only)
+target/release/pointblitz-bench replay --data <ply dir> --web . --port 8700
+```
+
+| Target | Start | Notes |
+|---|---|---|
+| browser | open `http://127.0.0.1:8700/static/web/index.html?scenario=replay&speed=60` | `&backend=webgl` forces WebGL2, `&pkg=webgpu` loads the WebGPU-only module, `&scenario=still` shows only the last snapshot |
+| native | `target/release/pointblitz-native --server http://127.0.0.1:8700 --scenario replay` | Vulkan / DX12 / Metal, whatever wgpu picks |
+| server video | `target/release/pointblitz-server serve --replay http://127.0.0.1:8700 --port 8720 --wait-for-client`, then open `http://127.0.0.1:8700/static/web/video.html` | Windows with an NVIDIA GPU (NVENC) and a browser with WebCodecs |
+
+Everywhere: drag to orbit, wheel to zoom, keys 1–8 for the fixed viewpoints. `speed` is the replay speed factor
+(60 = the 34-minute flight in about 34 s).
+
+Server video options and limits (decision 0042):
+
+- Frames are sent the moment they are encoded; on a 60 Hz display 2 of 5 rotation runs still showed an occasional
+  doubled frame, because the server's 60 Hz clock and the display drift apart.
+- `serve --phase-lock on` moves the server's tick to the browser's display so that drift goes away. It follows
+  **one** client (the first that reports), and it cannot match a display that is not 60 Hz. It is off by default:
+  it did not meet its acceptance bound (see [docs/bench/server-video.md](docs/bench/server-video.md) §2.5).
+- `?pacing=adaptive` (or `buffer`) on the video page holds one frame back and evens out frame timing, at the cost
+  of up to one frame of latency (decisions 0039, 0040). It is meant for displays that are not 60 Hz, but it has
+  **not been measured on such displays**.
+
 ## Documents
 
 | | |
@@ -80,6 +114,8 @@ PointBlitz 는 Rust + wgpu 로 만드는 점군 렌더러입니다. 같은 렌�
 - WebGL2 는 cold 에서 메인 스레드를 한 번 막습니다(목표: 0 회).
 - 서버 영상은 모든 목표를 지키지만, 회전 5 회 중 2 회는 화면 주기의 1 % 넘게 빈 주기가 생겼습니다(최대 6.32 %, 중앙값 0.40 %). 서버는 정확히 60 Hz, 화면은 60 Hz 보다 조금 느려 위상이 화면 갱신 경계를 지나가기 때문이며, 프레임이 사라지지는 않습니다.
 - 다른 하드웨어 값은 실측이 아니라 비용 모델로 추정합니다(두 번째 장비 보정 대기).
+
+직접 돌려 보려면 위 [Try it](#try-it) 를 보세요 — 재생 서버를 띄운 뒤 브라우저·native·서버 영상 중 하나로 봅니다(드래그 회전, 휠 확대, 1–8 고정 시점). 서버 영상은 Windows + NVIDIA(NVENC)가 필요하고, `--phase-lock on` 은 클라이언트 하나·60 Hz 화면에서만 맞으며(기본 끔), 영상 페이지의 `?pacing=adaptive` 는 한 프레임을 쌓아 두어 프레임 간격을 고르게 합니다(지연 최대 한 프레임) — 60 Hz 가 아닌 화면을 위한 것이지만 그런 화면에서는 재 보지 않았습니다.
 
 ## License
 
