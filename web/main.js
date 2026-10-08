@@ -26,7 +26,7 @@ const backend = params.get('backend') ?? 'auto';
 const memoryHints = params.get('memory') ?? 'memory'; // A/B: memory | performance (decision 0034)
 const pkgDir = params.get('pkg') === 'webgpu' ? './pkg-webgpu/' : './pkg/';
 let Viewer = null;
-const pb = (window.__pb = { marks: [], frames: [], longtasks: [], syncFrames: [], ready: false, done: false, setView });
+const pb = (window.__pb = { marks: [], frames: [], longtasks: [], syncFrames: [], stages: [], ready: false, done: false, setView });
 const mark = (name, extra = {}) => pb.marks.push({ name, t: performance.now(), ...extra });
 // Main-thread blocks over 50 ms (SPEC §6.2 main_thread_block), same observer as the baseline.
 new PerformanceObserver((list) => {
@@ -202,6 +202,7 @@ async function orbit() {
       }
       const t2 = performance.now();
       pb.syncFrames.push({ view: v.name, cpu: (t1 - t0) / batch, ms: (t2 - t0) / batch, batch });
+      if (params.get('stages') === '1') pb.stages.push(viewer.last_stages()); // P4.2: last frame of the batch
     }
   }
   mark('sync_end');
@@ -219,6 +220,7 @@ async function main() {
   mark('viewer_create_start');
   viewer = await Viewer.create(document.getElementById('view'), backend, memoryHints);
   mark('viewer_create_end');
+  if (params.get('glcopy') === '0') viewer.set_readback_copy(false); // P4.2 A/B only
   pb.info = JSON.parse(viewer.info());
   // WebGPU does not give wgpu the adapter name; the browser's GPUAdapter.info says which GPU it is.
   const a = navigator.gpu && pb.info.backend === 'BrowserWebGpu' ? await navigator.gpu.requestAdapter({ powerPreference: 'high-performance' }) : null;
