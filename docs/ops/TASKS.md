@@ -47,6 +47,6 @@
 | P3.1 | 인코더 경로: 헤드리스 프레임(1920×1080) → NVENC H.264. NVENC 직접 호출(FFI) / 외부 ffmpeg 프로세스 등 비교 결정 기록(GPU→인코더 복사 여부, `unsafe` 범위, 라이선스) | 고정 시점 8곳·orbit 프레임을 인코딩→디코딩해 원본 렌더 대비 SSIM 과 프레임당 인코딩 시간(p50/p95/p99), 비트레이트를 기록한다 | [x] 2026-10-08 `025462b` |
 | P3.2 | `pointblitz-server`: 재생 서버를 따라 장면을 갱신하고(세대·차분, 결정 0026 경로 재사용), 프레임을 인코딩해 WebSocket 으로 보냄. 프레임마다 메타데이터(프레임 번호, 반영된 스냅샷, 렌더·인코딩 시각, 마지막으로 반영한 입력 번호) | 14 이벤트 재생 동안 영상이 끊기지 않고 나가며, 테스트 클라이언트(헤드리스)가 받은 프레임 수·메타데이터를 검증한다 | [x] 2026-10-08 `88aa36b` |
 | P3.3 | 브라우저 클라이언트: WebSocket 수신 → WebCodecs 디코드 → 캔버스, 마우스·키 입력을 번호와 함께 보냄. 마크(결정 0020 이름 + 입력→표시) | 14 이벤트가 브라우저 화면에 나타나고, 입력 번호가 돌아온 프레임으로 입력→표시 지연을 기록한다. `main_thread_block` 확인(판정은 P3.4) | [x] 2026-10-08 `18b7953` |
-| P3.4 | server video 측정 + 비교표 server video 열: three.js·native·browser 와 같은 세션 번갈아(`bench/suite.sh` 확장), 고정 시점 영상 SSIM(대 native 캡처), 비트레이트·인코딩·디코딩 시간, 서버 GPU 사용 | `docs/bench/server-video.md`, SPEC §7.1(P3.0 에서 정한 값) 판정 | [ ] |
+| P3.4 | server video 측정 + 비교표 server video 열: three.js·native·browser 와 같은 세션 번갈아(`bench/suite.sh` 확장), 고정 시점 영상 SSIM(대 native 캡처), 비트레이트·인코딩·디코딩 시간, 서버 GPU 사용 | `docs/bench/server-video.md`, SPEC §7.1(P3.0 에서 정한 값) 판정 | [x] 2026-10-08 `4f6ca7f` |
 
 WebRTC 비교(결정 0010 "P3 이후")는 P3.4 결과를 보고 따로 쪼갠다. P4 이후는 P3 가 끝나면 쪼갠다.
