@@ -18,7 +18,7 @@ const before = fs.existsSync(gpu)
   ? fs.readFileSync(gpu, 'utf8').split('\n').filter((l) => l.startsWith('before,')).map((l) => Number(l.split(',')[2]))
   : [];
 const util = before.length ? before.reduce((a, b) => a + b, 0) / before.length : NaN;
-if (util > 15) why.push(`C1 before ${util.toFixed(1)} %`);
+if (!(util <= 15)) why.push(Number.isFinite(util) ? `C1 before ${util.toFixed(1)} %` : 'C1 no GPU record');
 
 const hz = top('display_hz');
 if (!(hz >= 59.5 && hz <= 60.5)) why.push(`C3 ${hz ?? 'no display_hz'}`);

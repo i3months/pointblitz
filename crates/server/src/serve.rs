@@ -5,6 +5,7 @@
 //! pointblitz-server serve --replay http://127.0.0.1:8700 [--port 8720] [--speed 60] [--qp 18]
 //!                         [--fps 60] [--viewpoints bench/viewpoints/flight-01.json] [--view overview_sw]
 //!                         [--exit-after-end <s>] [--wait-for-client] [--cold | --orbit] [--log <file>] [--wait-before-exit]
+//!                         [--phase-lock on|off] [--send poll]
 //! ```
 //!
 //! Each frame is one binary WebSocket message: `u32 LE metadata length`, the metadata (UTF-8 JSON),
@@ -21,8 +22,11 @@
 //!
 //! Clients send text messages: `{"id":n,"type":"orbit","dx":px,"dy":px}`, `{"id":n,"type":"zoom",
 //! "steps":s}`, `{"id":n,"type":"view","name":"north"}`. A client joining forces an IDR.
+//! A client may also report its display phase, `{"type":"phase","err_ms":e,"period_ms":p}`;
+//! with `--phase-lock on` the tick follows the first reporting client (decision 0042; off by default).
 
 use crate::nvenc::{Config, Encoder};
+use crate::phase::PhaseLock;
 use glam::DVec3;
 use pointblitz_core::{Camera, Headless, Inserted, Scene};
 use pointblitz_io::client::{self, Msg};
@@ -67,6 +71,15 @@ pub fn parse_input(text: &str) -> Option<(u64, Input)> {
         _ => return None,
     };
     Some((id, input))
+}
+
+/// Parses a client phase report (decision 0042) into (err_ms, period_ms).
+pub fn parse_phase(text: &str) -> Option<(f64, f64)> {
+    let v: serde_json::Value = serde_json::from_str(text).ok()?;
+    if v["type"].as_str()? != "phase" {
+        return None;
+    }
+    Some((v["err_ms"].as_f64()?, v["period_ms"].as_f64()?))
 }
 
 /// Rotates `v` about unit axis `k` by `angle` (Rodrigues).
@@ -126,26 +139,66 @@ fn broadcast(clients: &Clients, out: &Out) {
         .retain(|c| c.send(out.clone()).is_ok());
 }
 
-/// One thread per client: write frames from the channel, read input with a short timeout.
+fn to_message(out: Out) -> Message {
+    match out {
+        Out::Frame(f) => Message::Binary(f.as_ref().clone().into()),
+        Out::Text(t) => Message::Text(t.as_str().into()),
+    }
+}
+
+/// One client. `poll` = false (default, decision 0042): a writer thread sends each frame the moment
+/// it is queued and this thread blocks reading input. `poll` = true: the earlier single thread that
+/// read with a 1 ms timeout and sent in between — on Windows that timeout waits for the 15.6 ms
+/// system timer tick, so frames left on a 15.6 ms grid instead of every 16.7 ms (a sawtooth delay
+/// that walks through the client's display cycle; kept for the A/B only).
 fn client_thread(
     stream: TcpStream,
     frames: mpsc::Receiver<Out>,
     inputs: mpsc::Sender<(u64, Input, Instant)>,
+    client: usize,
+    phases: mpsc::Sender<(usize, f64, f64)>,
+    poll: bool,
 ) {
     let _ = stream.set_nodelay(true);
     let Ok(mut ws) = tungstenite::accept(stream) else {
         return;
     };
+    let on_text = |t: &str| {
+        if let Some(i) = parse_input(t) {
+            let _ = inputs.send((i.0, i.1, Instant::now()));
+        } else if let Some((err, period)) = parse_phase(t) {
+            let _ = phases.send((client, err, period));
+        }
+    };
+    if !poll {
+        // The reader never writes (clients send no pings), so the two WebSocket objects on one
+        // socket do not interleave writes. Every frame is sent: P frames depend on all earlier ones.
+        let Ok(raw) = ws.get_ref().try_clone() else {
+            return;
+        };
+        let mut writer =
+            tungstenite::WebSocket::from_raw_socket(raw, tungstenite::protocol::Role::Server, None);
+        std::thread::spawn(move || {
+            for out in frames {
+                if writer.send(to_message(out)).is_err() {
+                    return;
+                }
+            }
+        });
+        loop {
+            match ws.read() {
+                Ok(Message::Text(t)) => on_text(t.as_str()),
+                Ok(Message::Close(_)) | Err(_) => return,
+                Ok(_) => {}
+            }
+        }
+    }
     let _ = ws
         .get_mut()
         .set_read_timeout(Some(Duration::from_millis(1)));
     loop {
         match ws.read() {
-            Ok(Message::Text(t)) => {
-                if let Some(i) = parse_input(t.as_str()) {
-                    let _ = inputs.send((i.0, i.1, Instant::now()));
-                }
-            }
+            Ok(Message::Text(t)) => on_text(t.as_str()),
             Ok(Message::Close(_)) => return,
             Ok(_) => {}
             Err(tungstenite::Error::Io(e))
@@ -155,14 +208,8 @@ fn client_thread(
                 ) => {}
             Err(_) => return,
         }
-        // Send everything queued; the newest frame matters most, but P frames depend on every
-        // earlier one, so none is dropped here.
         while let Ok(out) = frames.try_recv() {
-            let msg = match out {
-                Out::Frame(f) => Message::Binary(f.as_ref().clone().into()),
-                Out::Text(t) => Message::Text(t.as_str().into()),
-            };
-            if ws.send(msg).is_err() {
+            if ws.send(to_message(out)).is_err() {
                 return;
             }
         }
@@ -243,6 +290,17 @@ pub fn run(args: &[String]) -> Result<(), String> {
     // --wait-before-exit: when finished, print "finished" on stderr and wait for a line on stdin, so
     // a harness can read this process's OS peak memory while it exists (decision 0032).
     let wait_before_exit = args.iter().any(|a| a == "--wait-before-exit");
+    // --phase-lock on|off (decision 0042): move the tick so frames reach the first reporting client
+    // in the middle of its display cycle. Off by default: in the C1–C4 A/B one orbit run of five went
+    // over 1 % (all its empty cycles while the lock was still converging) and refined latency was
+    // higher, so the acceptance bound was not met.
+    let phase_lock = match arg(args, "--phase-lock").unwrap_or("off") {
+        "on" => true,
+        "off" => false,
+        _ => return Err("--phase-lock on|off".into()),
+    };
+    // --send poll: the earlier polling send path (A/B only, see client_thread).
+    let poll_send = arg(args, "--send") == Some("poll");
     let mut camera = views
         .list
         .iter()
@@ -266,19 +324,26 @@ pub fn run(args: &[String]) -> Result<(), String> {
     let clients: Clients = Arc::new(Mutex::new(Vec::new()));
     let joined = Arc::new(AtomicBool::new(false));
     let (input_tx, input_rx) = mpsc::channel::<(u64, Input, Instant)>();
+    let (phase_tx, phase_rx) = mpsc::channel::<(usize, f64, f64)>();
     let listener =
         TcpListener::bind(("127.0.0.1", port)).map_err(|e| format!("bind {port}: {e}"))?;
-    eprintln!("serve: ws://127.0.0.1:{port}, {w}x{h} @ {fps} fps, QP {qp}, following {replay}");
+    eprintln!(
+        "serve: ws://127.0.0.1:{port}, {w}x{h} @ {fps} fps, QP {qp}, phase lock {}, following {replay}",
+        if phase_lock { "on" } else { "off" }
+    );
     {
         let clients = clients.clone();
         let joined = joined.clone();
         std::thread::spawn(move || {
-            for stream in listener.incoming().flatten() {
+            for (client, stream) in listener.incoming().flatten().enumerate() {
                 let (tx, rx) = mpsc::channel();
                 clients.lock().unwrap_or_else(|e| e.into_inner()).push(tx);
                 joined.store(true, Ordering::SeqCst);
                 let inputs = input_tx.clone();
-                std::thread::spawn(move || client_thread(stream, rx, inputs));
+                let phases = phase_tx.clone();
+                std::thread::spawn(move || {
+                    client_thread(stream, rx, inputs, client, phases, poll_send)
+                });
             }
         });
     }
@@ -319,6 +384,9 @@ pub fn run(args: &[String]) -> Result<(), String> {
     let mut orbit_from: Option<u64> = None;
     let orbit_base = camera.clone();
     let ms_since = |t: Instant| t.duration_since(t0).as_secs_f64() * 1e3;
+    let mut lock = PhaseLock::default();
+    // The client the lock follows: the first that reports; another takes over once it goes quiet.
+    let mut lock_client: Option<(usize, Instant)> = None;
     loop {
         let tick_start = Instant::now();
         let mut visible = Vec::new();
@@ -362,6 +430,29 @@ pub fn run(args: &[String]) -> Result<(), String> {
                 ms_since(tick_start)
             )
             .unwrap();
+        }
+        while let Ok((client, err, period)) = phase_rx.try_recv() {
+            let now = Instant::now();
+            if lock_client
+                .is_some_and(|(c, at)| c != client && now.duration_since(at).as_secs_f64() < 2.0)
+            {
+                continue;
+            }
+            lock_client = Some((client, now));
+            if !phase_lock {
+                continue;
+            }
+            if let Some(r) = lock.report(err, period, ms_since(now)) {
+                writeln!(
+                    log,
+                    r#"{{"type":"phase","client":{client},"t_ms":{:.3},"err_ms":{:.3},"added_ms":{:.3},"integral_ms":{:.3}}}"#,
+                    ms_since(now),
+                    r.err_ms,
+                    r.added_ms,
+                    r.integral_ms
+                )
+                .unwrap();
+            }
         }
         let phase = if orbit {
             if orbit_from.is_none() && ended_at.is_some() && newest_visible.is_some() {
@@ -455,6 +546,13 @@ pub fn run(args: &[String]) -> Result<(), String> {
             return Ok(());
         }
         next += tick;
+        // Phase lock: at most ±1 ms per tick, later (positive) or earlier (negative).
+        let shift = lock.tick_shift(ms_since(Instant::now()));
+        if shift >= 0.0 {
+            next += Duration::from_secs_f64(shift / 1e3);
+        } else {
+            next -= Duration::from_secs_f64(-shift / 1e3);
+        }
         let now = Instant::now();
         if next > now {
             std::thread::sleep(next - now);
