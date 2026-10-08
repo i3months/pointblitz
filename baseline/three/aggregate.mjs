@@ -22,7 +22,8 @@ const records = fs
       .trim()
       .split('\n')
       .filter(Boolean)
-      .map((l) => ({ target: 'three.js', ...JSON.parse(l), file: f })),
+      .map((l) => ({ target: 'three.js', ...JSON.parse(l), file: f }))
+      .filter((r) => r.metric), // other JSON lines (e.g. server logs) are not metric records
   );
 
 const groups = new Map();

@@ -4,7 +4,7 @@
 //! ```text
 //! pointblitz-server serve --replay http://127.0.0.1:8700 [--port 8720] [--speed 60] [--qp 18]
 //!                         [--fps 60] [--viewpoints bench/viewpoints/flight-01.json] [--view overview_sw]
-//!                         [--exit-after-end <s>] [--wait-for-client] [--cold]
+//!                         [--exit-after-end <s>] [--wait-for-client] [--cold | --orbit] [--log <file>] [--wait-before-exit]
 //! ```
 //!
 //! Each frame is one binary WebSocket message: `u32 LE metadata length`, the metadata (UTF-8 JSON),
@@ -130,7 +130,7 @@ fn broadcast(clients: &Clients, out: &Out) {
 fn client_thread(
     stream: TcpStream,
     frames: mpsc::Receiver<Out>,
-    inputs: mpsc::Sender<(u64, Input)>,
+    inputs: mpsc::Sender<(u64, Input, Instant)>,
 ) {
     let _ = stream.set_nodelay(true);
     let Ok(mut ws) = tungstenite::accept(stream) else {
@@ -143,7 +143,7 @@ fn client_thread(
         match ws.read() {
             Ok(Message::Text(t)) => {
                 if let Some(i) = parse_input(t.as_str()) {
-                    let _ = inputs.send(i);
+                    let _ = inputs.send((i.0, i.1, Instant::now()));
                 }
             }
             Ok(Message::Close(_)) => return,
@@ -233,7 +233,16 @@ pub fn run(args: &[String]) -> Result<(), String> {
         load_views(arg(args, "--viewpoints").unwrap_or("bench/viewpoints/flight-01.json"))?;
     let start_view = arg(args, "--view").unwrap_or("overview_sw");
     // --cold: only the last snapshot, as one full delivery (SPEC §6.1 cold).
-    let cold = args.iter().any(|a| a == "--cold");
+    // --orbit (P3.4): the last snapshot, then three turns around the start view's target at 1.5° per
+    // frame; frame metadata says phase load / orbit / done, and the server exits shortly after.
+    let orbit = args.iter().any(|a| a == "--orbit");
+    let cold = orbit || args.iter().any(|a| a == "--cold");
+    // --log <file>: per input (received → applied tick → frame) and per late tick (where the time
+    // went), as JSON lines — for the P3.4 analysis.
+    let log_path = arg(args, "--log").map(str::to_string);
+    // --wait-before-exit: when finished, print "finished" on stderr and wait for a line on stdin, so
+    // a harness can read this process's OS peak memory while it exists (decision 0032).
+    let wait_before_exit = args.iter().any(|a| a == "--wait-before-exit");
     let mut camera = views
         .list
         .iter()
@@ -256,7 +265,7 @@ pub fn run(args: &[String]) -> Result<(), String> {
     // WebSocket clients (127.0.0.1 only, like the replay server).
     let clients: Clients = Arc::new(Mutex::new(Vec::new()));
     let joined = Arc::new(AtomicBool::new(false));
-    let (input_tx, input_rx) = mpsc::channel::<(u64, Input)>();
+    let (input_tx, input_rx) = mpsc::channel::<(u64, Input, Instant)>();
     let listener =
         TcpListener::bind(("127.0.0.1", port)).map_err(|e| format!("bind {port}: {e}"))?;
     eprintln!("serve: ws://127.0.0.1:{port}, {w}x{h} @ {fps} fps, QP {qp}, following {replay}");
@@ -302,6 +311,14 @@ pub fn run(args: &[String]) -> Result<(), String> {
     let mut newest_visible: Option<u32> = None;
     let mut ended_at: Option<Instant> = None;
     let mut late = 0u64;
+    let mut log = String::new();
+    let (mut render_all, mut encode_all, mut over_budget) = (Vec::new(), Vec::new(), 0u64);
+    const ORBIT_WAIT: u64 = 30;
+    const ORBIT_FRAMES: u64 = 720;
+    const ORBIT_STEP_DEG: f64 = 1.5;
+    let mut orbit_from: Option<u64> = None;
+    let orbit_base = camera.clone();
+    let ms_since = |t: Instant| t.duration_since(t0).as_secs_f64() * 1e3;
     loop {
         let tick_start = Instant::now();
         let mut visible = Vec::new();
@@ -334,10 +351,36 @@ pub fn run(args: &[String]) -> Result<(), String> {
                 Msg::Delivered { .. } => {}
             }
         }
-        while let Ok((id, input)) = input_rx.try_recv() {
+        let t_msgs = Instant::now();
+        while let Ok((id, input, rx)) = input_rx.try_recv() {
             apply(&mut camera, &input, &views.list);
             last_input = last_input.max(id);
+            writeln!(
+                log,
+                r#"{{"type":"input","id":{id},"rx_ms":{:.3},"tick_ms":{:.3},"frame":{frame}}}"#,
+                ms_since(rx),
+                ms_since(tick_start)
+            )
+            .unwrap();
         }
+        let phase = if orbit {
+            if orbit_from.is_none() && ended_at.is_some() && newest_visible.is_some() {
+                orbit_from = Some(frame + ORBIT_WAIT);
+            }
+            match orbit_from {
+                Some(f0) if frame >= f0 && frame < f0 + ORBIT_FRAMES => {
+                    let k = (frame - f0) as f64 * ORBIT_STEP_DEG;
+                    let up = orbit_base.up.normalize();
+                    camera.eye = orbit_base.target
+                        + rotate(orbit_base.eye - orbit_base.target, up, k.to_radians());
+                    "orbit"
+                }
+                Some(f0) if frame >= f0 + ORBIT_FRAMES => "done",
+                _ => "load",
+            }
+        } else {
+            "replay"
+        };
 
         let t_render = Instant::now();
         let rgba = hl.capture(&device, &queue, &camera, &scene);
@@ -347,7 +390,7 @@ pub fn run(args: &[String]) -> Result<(), String> {
         let mut meta = String::new();
         write!(
             meta,
-            "{{\"frame\":{frame},\"idr\":{},\"t_ms\":{:.3},\"render_ms\":{render_ms:.3},\"encode_ms\":{:.3},\"visible\":{:?},\"snapshot\":{},\"input\":{last_input},\"points\":{}}}",
+            "{{\"frame\":{frame},\"idr\":{},\"t_ms\":{:.3},\"render_ms\":{render_ms:.3},\"encode_ms\":{:.3},\"visible\":{:?},\"snapshot\":{},\"input\":{last_input},\"points\":{},\"phase\":\"{phase}\"}}",
             f.idr,
             tick_start.duration_since(t0).as_secs_f64() * 1e3,
             f.upload_ms + f.encode_ms,
@@ -361,11 +404,54 @@ pub fn run(args: &[String]) -> Result<(), String> {
             &Out::Frame(Arc::new(frame_message(&meta, &f.bytes))),
         );
         frame += 1;
+        let tick_ms = tick_start.elapsed().as_secs_f64() * 1e3;
+        render_all.push(render_ms);
+        encode_all.push(f.upload_ms + f.encode_ms);
+        if tick_ms > 1000.0 / f64::from(fps) {
+            over_budget += 1;
+            writeln!(
+                log,
+                r#"{{"type":"late","frame":{},"tick_ms":{tick_ms:.3},"messages_ms":{:.3},"render_ms":{render_ms:.3},"encode_ms":{:.3},"chunks":{}}}"#,
+                frame - 1,
+                t_msgs.duration_since(tick_start).as_secs_f64() * 1e3,
+                f.upload_ms + f.encode_ms,
+                visible.len()
+            )
+            .unwrap();
+        }
 
-        if let (Some(at), Some(secs)) = (ended_at, exit_after_end)
-            && at.elapsed().as_secs_f64() >= secs
-        {
-            eprintln!("serve: replay ended, {frame} frames, {late} late ticks");
+        let finished = if orbit {
+            orbit_from.is_some_and(|f0| frame >= f0 + ORBIT_FRAMES + 30)
+        } else {
+            matches!((ended_at, exit_after_end), (Some(at), Some(secs)) if at.elapsed().as_secs_f64() >= secs)
+        };
+        if finished {
+            let pct = |v: &mut Vec<f64>, q: f64| {
+                v.sort_by(f64::total_cmp);
+                v.get(((v.len().max(1) - 1) as f64 * q).round() as usize)
+                    .copied()
+                    .unwrap_or(f64::NAN)
+            };
+            writeln!(
+                log,
+                r#"{{"type":"summary","frames":{frame},"late_ticks":{late},"over_budget_ticks":{over_budget},"render_ms_p50":{:.3},"render_ms_p95":{:.3},"render_ms_p99":{:.3},"encode_ms_p50":{:.3},"encode_ms_p95":{:.3},"encode_ms_p99":{:.3}}}"#,
+                pct(&mut render_all, 0.5),
+                pct(&mut render_all, 0.95),
+                pct(&mut render_all, 0.99),
+                pct(&mut encode_all, 0.5),
+                pct(&mut encode_all, 0.95),
+                pct(&mut encode_all, 0.99),
+            )
+            .unwrap();
+            eprintln!("serve: finished, {frame} frames, {late} late ticks");
+            if let Some(path) = &log_path {
+                std::fs::write(path, &log).map_err(|e| format!("{path}: {e}"))?;
+            }
+            if wait_before_exit {
+                eprintln!("finished");
+                let mut line = String::new();
+                let _ = std::io::stdin().read_line(&mut line);
+            }
             return Ok(());
         }
         next += tick;
