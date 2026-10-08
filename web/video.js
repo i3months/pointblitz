@@ -240,6 +240,35 @@ ws.onopen = () => {
     }, 500);
   }
 };
+// Interactive controls (P4.7 demo): the server moves its camera, as in the native viewer — drag to
+// orbit, wheel to zoom, keys 1–8 for the fixed viewpoints. Ids share the capture hook's range, apart
+// from the latency inputs above; only real input sends anything.
+const viewNames = fetch('/static/bench/viewpoints/flight-01.json')
+  .then((r) => r.json())
+  .then((v) => v.viewpoints.map((p) => p.name))
+  .catch(() => []);
+const sendUser = (msg) => ws.readyState === WebSocket.OPEN && ws.send(JSON.stringify({ id: viewId++, ...msg }));
+{
+  let drag = null;
+  canvas.addEventListener('pointerdown', (e) => {
+    drag = [e.clientX, e.clientY];
+    canvas.setPointerCapture(e.pointerId);
+  });
+  canvas.addEventListener('pointerup', () => (drag = null));
+  canvas.addEventListener('pointermove', (e) => {
+    if (!drag) return;
+    sendUser({ type: 'orbit', dx: e.clientX - drag[0], dy: e.clientY - drag[1] });
+    drag = [e.clientX, e.clientY];
+  });
+  canvas.addEventListener('wheel', (e) => {
+    e.preventDefault();
+    sendUser({ type: 'zoom', steps: e.deltaY < 0 ? 1 : -1 });
+  }, { passive: false });
+  addEventListener('keydown', async (e) => {
+    const name = (await viewNames)[Number(e.key) - 1];
+    if (name) sendUser({ type: 'view', name });
+  });
+}
 ws.onmessage = onMessage;
 ws.onerror = () => mark('error', { message: 'websocket error' });
 ws.onclose = async () => {

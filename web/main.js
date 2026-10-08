@@ -72,12 +72,59 @@ function redraw() {
   return new Promise((resolve) => waiters.push(resolve));
 }
 
+let cam = null; // { eye, target, up } as plain arrays, for the interactive controls
+
 async function setView(name) {
   const v = viewpoints.find((x) => x.name === name);
   if (!v) throw new Error(`unknown viewpoint ${name}`);
+  cam = { eye: [...v.eye], target: [...v.target], up: [...v.up] };
   viewer.set_camera(new Float64Array(v.eye), new Float64Array(v.target), new Float64Array(v.up), fov);
   await redraw();
   mark('view', { view: name });
+}
+
+// Interactive controls (P4.7 demo), the same as the native viewer and the server: drag to orbit
+// (0.005 rad per pixel), wheel to zoom (×0.9 per step), keys 1–8 for the fixed viewpoints. Only
+// real input moves the camera, so measurement runs are unchanged.
+const sub = (a, b) => a.map((x, i) => x - b[i]);
+const add = (a, b) => a.map((x, i) => x + b[i]);
+const scale = (a, s) => a.map((x) => x * s);
+const dot = (a, b) => a.reduce((s, x, i) => s + x * b[i], 0);
+const cross = (a, b) => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
+const norm = (a) => scale(a, 1 / (Math.hypot(...a) || 1));
+const rotate = (v, k, angle) => add(add(scale(v, Math.cos(angle)), scale(cross(k, v), Math.sin(angle))), scale(k, dot(k, v) * (1 - Math.cos(angle))));
+function applyCamera() {
+  viewer.set_camera(new Float64Array(cam.eye), new Float64Array(cam.target), new Float64Array(cam.up), fov);
+  dirty = true;
+}
+function attachControls(canvas) {
+  let drag = null;
+  canvas.addEventListener('pointerdown', (e) => {
+    drag = [e.clientX, e.clientY];
+    canvas.setPointerCapture(e.pointerId);
+  });
+  canvas.addEventListener('pointerup', () => (drag = null));
+  canvas.addEventListener('pointermove', (e) => {
+    if (!drag || !cam) return;
+    const [dx, dy] = [e.clientX - drag[0], e.clientY - drag[1]];
+    drag = [e.clientX, e.clientY];
+    const up = norm(cam.up);
+    const yaw = rotate(sub(cam.eye, cam.target), up, -dx * 0.005);
+    const right = norm(cross(yaw, up));
+    const pitched = rotate(yaw, right, -dy * 0.005);
+    cam.eye = add(cam.target, Math.abs(dot(norm(pitched), up)) < 0.995 ? pitched : yaw);
+    applyCamera();
+  });
+  canvas.addEventListener('wheel', (e) => {
+    if (!cam) return;
+    e.preventDefault();
+    cam.eye = add(cam.target, scale(sub(cam.eye, cam.target), 0.9 ** (e.deltaY < 0 ? 1 : -1)));
+    applyCamera();
+  }, { passive: false });
+  addEventListener('keydown', (e) => {
+    const v = viewpoints[Number(e.key) - 1];
+    if (v) setView(v.name);
+  });
 }
 
 let have = null; // [generation, points] the scene holds (decision 0026)
@@ -233,6 +280,7 @@ async function main() {
   viewpoints = vp.viewpoints;
   fov = vp.camera.fov_y_deg;
   await setView(params.get('view') ?? 'overview_sw');
+  if (scenario !== 'orbit') attachControls(document.getElementById('view'));
   const manifest = (await (await fetch('/manifest.json')).json()).events;
   mark('start', { scenario });
   pb.ready = true;
