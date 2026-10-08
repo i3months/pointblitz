@@ -71,6 +71,7 @@ const raw = {
   speed,
   marks,
   frames: by('frames')[0]?.t ?? [],
+  presentClock: by('present_clock')[0]?.t ?? [],
   longtasks: [],
   syncFrames: by('sync_frame').map((f) => ({ view: f.view, cpu: f.cpu, ms: f.ms })),
   proc: { renderer: samples[child.pid] ?? [], gpu: [] },

@@ -489,10 +489,53 @@ impl App {
         s
     }
 
+    /// Display clock for rule C3 (decision 0040): with vsync (FIFO) the swapchain acquire waits for
+    /// the display, so the times at which 120 back-to-back acquires return are paced by it. Run at
+    /// the end, after everything measured. Empty without vsync (the acquire is not paced then).
+    fn clock_probe(&mut self) -> Vec<f64> {
+        let Some(gpu) = &mut self.gpu else { return Vec::new() };
+        if !self.args.vsync {
+            return Vec::new();
+        }
+        let mut times = Vec::with_capacity(120);
+        for _ in 0..120 {
+            let tex = match gpu.surface.get_current_texture() {
+                wgpu::CurrentSurfaceTexture::Success(t)
+                | wgpu::CurrentSurfaceTexture::Suboptimal(t) => t,
+                _ => break,
+            };
+            times.push(self.marks.ms(Instant::now()));
+            let view = tex
+                .texture
+                .create_view(&wgpu::TextureViewDescriptor::default());
+            let mut enc = gpu
+                .device
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
+            let size = [gpu.config.width, gpu.config.height];
+            gpu.renderer.render(
+                &gpu.device,
+                &gpu.queue,
+                &mut enc,
+                &view,
+                &gpu.depth,
+                size,
+                &self.camera,
+                &self.scene,
+            );
+            gpu.queue.submit([enc.finish()]);
+            gpu.window.pre_present_notify();
+            gpu.queue.present(tex);
+        }
+        times
+    }
+
     fn finish(&mut self, event_loop: &ActiveEventLoop) {
         eprint!("{}", self.summary());
+        let clock = self.clock_probe();
         if let Some(path) = &self.args.marks {
             let mut out = self.marks.lines.clone();
+            let clock: Vec<String> = clock.iter().map(|f| format!("{f:.3}")).collect();
+            writeln!(out, "{{\"name\":\"present_clock\",\"t\":[{}]}}", clock.join(",")).unwrap();
             let frames: Vec<String> = self
                 .marks
                 .frames

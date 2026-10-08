@@ -76,8 +76,13 @@ export function summarize(raw, { device, commit, target = 'three.js' }) {
   // The frame clock the run actually had (rule C3, decision 0040): 1000 / median interval of each
   // time-ordered quarter, keeping the one farthest from 60 Hz, so a clock that changes part-way
   // through is caught and load stalls do not move it. A display off by the idle timeout gives ~56.6 Hz.
+  // Native draws on demand, so its frame intervals are not the display clock (supervisor decision):
+  // it uses the vsync-paced present probe at the end of the run (presentClock), or nothing.
+  const clockDeltas = raw.presentClock?.length
+    ? raw.presentClock.slice(1).map((t, i) => t - raw.presentClock[i])
+    : target === 'native' ? [] : deltas;
   const quarterHz = [0, 1, 2, 3].map((k) => {
-    const q = deltas.slice(Math.floor((k * deltas.length) / 4), Math.floor(((k + 1) * deltas.length) / 4)).sort((a, b) => a - b);
+    const q = clockDeltas.slice(Math.floor((k * clockDeltas.length) / 4), Math.floor(((k + 1) * clockDeltas.length) / 4)).sort((a, b) => a - b);
     return q.length ? 1000 / percentile(q, 0.5) : NaN;
   }).filter(Number.isFinite);
   deltas.sort((a, b) => a - b);
@@ -89,7 +94,10 @@ export function summarize(raw, { device, commit, target = 'three.js' }) {
   }
   if (quarterHz.length) {
     const worst = quarterHz.reduce((a, b) => (Math.abs(b - 60) > Math.abs(a - 60) ? b : a));
-    out.push(rec('display_hz', worst, 'Hz', deltas.length, { quarters: quarterHz.map((x) => +x.toFixed(2)) }));
+    out.push(rec('display_hz', worst, 'Hz', clockDeltas.length, {
+      quarters: quarterHz.map((x) => +x.toFixed(2)),
+      method: raw.presentClock?.length ? 'vsync present probe' : 'rAF',
+    }));
   }
 
   // SPEC §6.2 frame_time (CPU and GPU separately) = synchronised frames at each fixed viewpoint
