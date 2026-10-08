@@ -12,4 +12,4 @@
 - 다음 할 일: P3.2 → P3.4. P4 공개 전 frame 진단(PR #21 검토)
 - 소유자 결정 대기: 없음(외부 파일 다운로드가 필요해지면 작업자가 소유자에게 직접 허락을 받는다 — 작업자 운영 규칙)
 - 외부 팀과 정할 것: skyrecon 이 preview "덧붙임" 메타데이터를 낼지([docs/notes/skyrecon-append-metadata.md](../notes/skyrecon-append-metadata.md))
-- 막힌 점: 없음
+- 막힌 점: **main 의 ubuntu CI 실패**(PR #24 병합, `crates/server/src/main.rs` 비 Windows 타입 추론 오류) — 작업자 수정 PR 대기. 감독이 CI 실패를 확인하지 않고 병합한 절차 실수([pr-24](reviews/pr-24.md))
