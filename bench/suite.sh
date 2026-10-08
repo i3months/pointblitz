@@ -3,7 +3,9 @@
 # session (PR #10 review — sessions drift, so both implementations must share one).
 #
 # usage: bash bench/suite.sh <ply dir> <out dir>        (run from the repository root)
-# env:   COLD=5 ORBIT=5 X60=3 X1=0 PORT=8783 IMPLS="three native web webs webgl video"
+# env:   COLD=5 ORBIT=5 X60=3 X1=0 PORT=8783 IMPLS="three native web webs webgl video" B1_UPLOAD=a
+#        three-b1 / three-b1-webgpu / three-b2 = incremental three.js baselines (decision 0048),
+#        three-b1a / three-b1b = B1 with upload (a) / (b), for the upload smoke
 #        web = PointBlitz in Chrome on WebGPU, webs = same with the WebGPU-only module (decision 0033),
 #        webgl = same page with WebGPU switched off (WebGL2), video = server video (serve + WebCodecs client)
 #
@@ -51,6 +53,12 @@ run() { # impl scenario speed index
   echo "$(date +%H:%M:%S) $name"
   case $impl in
     three) cmd=(node baseline/three/run.mjs --server "$URL" --scenario "$scen" --speed "$speed" --metrics "$ABS_OUT/$name.jsonl") ;;
+    # Incremental three.js baselines (decision 0048). B1_UPLOAD picks B1's upload (smoke: a vs b).
+    three-b1) cmd=(node baseline/three/run.mjs --server "$URL" --label three-b1 --query "mode=b1&upload=${B1_UPLOAD:-a}" --scenario "$scen" --speed "$speed" --metrics "$ABS_OUT/$name.jsonl") ;;
+    three-b1a) cmd=(node baseline/three/run.mjs --server "$URL" --label three-b1a --query "mode=b1&upload=a" --scenario "$scen" --speed "$speed" --metrics "$ABS_OUT/$name.jsonl") ;;
+    three-b1b) cmd=(node baseline/three/run.mjs --server "$URL" --label three-b1b --query "mode=b1&upload=b" --scenario "$scen" --speed "$speed" --metrics "$ABS_OUT/$name.jsonl") ;;
+    three-b1-webgpu) cmd=(node baseline/three/run.mjs --server "$URL" --label three-b1-webgpu --query "mode=b1&upload=${B1_UPLOAD:-a}&renderer=webgpu" --scenario "$scen" --speed "$speed" --metrics "$ABS_OUT/$name.jsonl") ;;
+    three-b2) cmd=(node baseline/three/run.mjs --server "$URL" --label three-b2 --query "mode=b2" --scenario "$scen" --speed "$speed" --metrics "$ABS_OUT/$name.jsonl") ;;
     web) cmd=(node baseline/three/run.mjs --server "$URL" --target web --label web-webgpu --scenario "$scen" --speed "$speed" --metrics "$ABS_OUT/$name.jsonl") ;;
     webs) cmd=(node baseline/three/run.mjs --server "$URL" --target web --label web-webgpu-only --query pkg=webgpu --scenario "$scen" --speed "$speed" --metrics "$ABS_OUT/$name.jsonl") ;;
     webgl) cmd=(node baseline/three/run.mjs --server "$URL" --target web --label web-webgl2 --chrome-args disable-features=WebGPUService --scenario "$scen" --speed "$speed" --metrics "$ABS_OUT/$name.jsonl") ;;

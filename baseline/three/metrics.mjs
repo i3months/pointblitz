@@ -208,9 +208,12 @@ export function summarize(raw, { device, commit, target = 'three.js' }) {
   if (heap.length) out.push(rec('mem_js_heap_max', Math.max(...heap), 'B', heap.length));
   const last = by('parse_end').at(-1);
   if (last?.points) {
-    const perPoint = 12 * (last.attributes ?? 3);
+    // B1/B2 (decision 0048) report their uploaded bytes per point; B0 uploads float32×3 per attribute.
+    const perPoint = last.bytesPerPoint ?? 12 * (last.attributes ?? 3);
     out.push(rec('mem_gpu_estimate', last.points * perPoint, 'B', 1, {
-      method: `points × ${perPoint} B (${last.attributeNames ?? 'position,normal,color'} float32×3)`,
+      method: last.bytesPerPoint
+        ? `points × ${perPoint} B (uploaded attribute bytes)`
+        : `points × ${perPoint} B (${last.attributeNames ?? 'position,normal,color'} float32×3)`,
     }));
   }
 

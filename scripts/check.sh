@@ -49,7 +49,7 @@ done
 cargo publish --workspace --exclude pointblitz-bench --dry-run --allow-dirty --quiet
 
 step "browser client unit tests"
-node --test web/chunks.test.mjs
+node --test web/chunks.test.mjs baseline/three/ply-parse.test.mjs
 
 echo
 echo "all checks passed"

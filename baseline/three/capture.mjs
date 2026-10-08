@@ -1,6 +1,7 @@
 // Captures the three.js baseline at the 8 fixed viewpoints (P0.4, recheck of P0.2).
 //
 // usage: node capture.mjs --server http://127.0.0.1:8700 --out <dir> [--chrome <path>] [--headed]
+//                        [--query mode=b1&upload=a]   (baseline variant, decision 0048)
 // The replay server must serve the repository root as its web root:
 //   pointblitz-bench replay --data <ply dir> --web <repo root>
 //
@@ -26,10 +27,11 @@ const browser = await chromium.launch({
 });
 const page = await browser.newPage({ viewport: { width: 1920, height: 1080 }, deviceScaleFactor: 1 });
 page.on('console', (m) => m.type() === 'error' && console.error('page:', m.text()));
-await page.goto(`${server}/static/baseline/three/index.html?scenario=cold`);
+await page.goto(`${server}/static/baseline/three/index.html?scenario=cold${args.query ? `&${args.query}` : ""}`);
 await page.waitForFunction(() => window.__pb?.done, null, { timeout: 300_000 });
 
 const gpu = await page.evaluate(() => {
+  if (window.__pb.gpu) return `${window.__pb.gpu.vendor} ${window.__pb.gpu.architecture} (three.js WebGPURenderer)`;
   const gl = document.querySelector('canvas').getContext('webgl2');
   const ext = gl.getExtension('WEBGL_debug_renderer_info');
   return ext ? gl.getParameter(ext.UNMASKED_RENDERER_WEBGL) : gl.getParameter(gl.RENDERER);

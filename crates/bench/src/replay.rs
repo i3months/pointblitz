@@ -9,6 +9,8 @@
 //! - `GET /events?speed=N&start=first|zero` — SSE stream, one `event` per snapshot.
 //! - `GET /data/<file>` — snapshot bytes, uncompressed.
 //! - `GET /chunks/<seq>?have=<generation>.<points>` — the snapshot as PointBlitz chunks (`chunks.rs`).
+//! - `GET /data/<file>?have=<generation>.<points>` — the PLY, or its header + appended records only
+//!   (B2 baseline, decision 0048).
 //! - `GET /static/<path>` — files under the web root (baseline pages).
 
 use std::io::{BufRead, BufReader, Read, Write};
@@ -269,8 +271,16 @@ fn handle(server: &Server, mut stream: TcpStream) -> std::io::Result<()> {
         }
         p if p.starts_with("/data/") => {
             let name = &p["/data/".len()..];
-            match server.events.iter().find(|e| e.file == name) {
-                Some(e) => serve_file(&mut stream, &server.data.join(&e.file)),
+            match server.events.iter().position(|e| e.file == name) {
+                // B2 baseline (decision 0048): with have=, the same plan as /chunks decides whether
+                // only the appended records are sent.
+                Some(idx) if q("have").is_some() => serve_data_have(
+                    server,
+                    &mut stream,
+                    idx,
+                    q("have").and_then(crate::chunks::parse_have),
+                ),
+                Some(idx) => serve_file(&mut stream, &server.data.join(&server.events[idx].file)),
                 None => respond(&mut stream, 404, "text/plain", b"not found"),
             }
         }
@@ -435,6 +445,49 @@ fn serve_file(stream: &mut TcpStream, path: &Path) -> std::io::Result<()> {
     stream.flush()
 }
 
+/// Header of the PLY at `path` and its records after the first `skip` points (decision 0048).
+fn ply_parts(path: &Path, skip: usize) -> std::io::Result<(Vec<u8>, Vec<u8>, usize)> {
+    use std::io::{Seek, SeekFrom};
+    let mut file = std::fs::File::open(path)?;
+    let mut head = Vec::new();
+    (&mut file).take(64 * 1024).read_to_end(&mut head)?;
+    let h = pointblitz_io::parse_header(&head)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+    let skip = skip.min(h.vertex_count);
+    let mut records = vec![0u8; (h.vertex_count - skip) * h.stride];
+    file.seek(SeekFrom::Start((h.header_len + skip * h.stride) as u64))?;
+    file.read_exact(&mut records)?;
+    head.truncate(h.header_len);
+    Ok((head, records, skip))
+}
+
+/// `GET /data/<file>?have=<generation>.<points>` for the B2 baseline (decision 0048): a delta is the
+/// PLY header followed by only the records after `points` (`X-PB-Skip`); otherwise the whole file.
+fn serve_data_have(
+    server: &Server,
+    stream: &mut TcpStream,
+    idx: usize,
+    have: Option<(u32, usize)>,
+) -> std::io::Result<()> {
+    use crate::chunks::{Plan, plan};
+    // Same generation numbering as /chunks: a delta extends the client's generation.
+    let (kind, generation, skip) = match plan(&server.events, idx, have, |k| server.appends[k]) {
+        Plan::Full { generation } => ("full", generation, 0),
+        Plan::Delta { generation, skip } => ("delta", generation, skip),
+    };
+    let (head, records, skip) = ply_parts(&server.data.join(&server.events[idx].file), skip)?;
+    write!(
+        stream,
+        "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\n\
+         Content-Length: {}\r\nX-PB-Delivery: {kind}\r\nX-PB-Skip: {skip}\r\n\
+         X-PB-Generation: {generation}\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n",
+        head.len() + records.len(),
+    )?;
+    stream.write_all(&head)?;
+    stream.write_all(&records)?;
+    stream.flush()
+}
+
 fn respond(stream: &mut TcpStream, code: u16, ty: &str, body: &[u8]) -> std::io::Result<()> {
     let reason = match code {
         200 => "OK",
@@ -455,6 +508,31 @@ fn respond(stream: &mut TcpStream, code: u16, ty: &str, body: &[u8]) -> std::io:
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ply_parts_splits_header_and_tail_records() {
+        let mut bytes = b"ply\nformat binary_little_endian 1.0\nelement vertex 3\n\
+            property float x\nproperty float y\nproperty float z\n\
+            property uchar red\nproperty uchar green\nproperty uchar blue\nend_header\n"
+            .to_vec();
+        let header_len = bytes.len();
+        for i in 0..3u8 {
+            for v in [f32::from(i), 2.0 * f32::from(i), -1.0] {
+                bytes.extend_from_slice(&v.to_le_bytes());
+            }
+            bytes.extend_from_slice(&[i, 10 + i, 20 + i]);
+        }
+        let path = std::env::temp_dir().join(format!("pb-ply-parts-{}.ply", std::process::id()));
+        std::fs::write(&path, &bytes).unwrap();
+        let (head, tail, skip) = ply_parts(&path, 1).unwrap();
+        let (_, whole, none) = ply_parts(&path, 0).unwrap();
+        let (_, empty, capped) = ply_parts(&path, 9).unwrap();
+        std::fs::remove_file(&path).ok();
+        assert_eq!(head, bytes[..header_len]);
+        assert_eq!((skip, tail.as_slice()), (1, &bytes[header_len + 15..]));
+        assert_eq!((none, whole.as_slice()), (0, &bytes[header_len..]));
+        assert_eq!((capped, empty.len()), (3, 0));
+    }
 
     #[test]
     fn parses_skyrecon_snapshot_names() {

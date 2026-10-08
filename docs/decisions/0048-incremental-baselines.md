@@ -34,12 +34,22 @@
 - 올리기 — three.js 의 `InterleavedBuffer` 는 타입 배열 하나만 받으므로 청크(위치 f32×3 + 색 u8×4, 16 B)를 그대로 한 버퍼로 쓸 수 없다. 두 안을 **스모크로 비교해 빠른 쪽을 B1 으로** 정한다(진 쪽은 각주):
   - (a) 청크 본문에 `InterleavedBuffer` 두 개 — 위치 `Float32Array`(보폭 4), 색 `Uint8Array`(보폭 16, 오프셋 12, normalized). CPU 복사 없음, GPU 에 같은 바이트를 두 번 올림(점당 32 B).
   - (b) CPU 에서 위치 `Float32Array`(12 B)와 색 `Uint8Array`(4 B)로 나눠 복사한 뒤 일반 `BufferAttribute` 두 개. GPU 점당 16 B, 복사 한 번.
-  - 스모크: 같은 세션에서 cold·replay ×60 각 2 회씩 번갈아, `event_latency`(preview·refined p50)·`first_frame`·`mem_cpu`·메인 스레드 멈춤을 본다. 지연이 먼저, 같으면(5 % 안) 메모리가 적은 쪽. 결과와 이유는 구현 PR 에서 이 결정에 적는다.
+  - 스모크: 같은 세션에서 cold·replay ×60 각 2 회씩 번갈아, `event_latency`(preview·refined p50)·`first_frame`·`mem_cpu`·메인 스레드 멈춤을 본다. 지연이 먼저, 같으면(5 % 안) 메모리가 적은 쪽.
+  - **스모크 결과(2026-10-09, 8 회 모두 C1–C4 유효, 판정 아님)** — 2 회 중앙값:
+
+    | | cold event_latency | replay preview p50 | replay refined p50 | mem_cpu cold / replay | GPU(추정) | 메인 스레드 멈춤(replay) |
+    |---|---|---|---|---|---|---|
+    | (a) 두 번 올리기 | 129.9 ms | 30.9 ms | 122.8 ms | 116 / 208 MB | 32 B/점 | 2 회씩(합 114·112 ms) |
+    | (b) 나눠 복사 | 140.6 ms(109·172) | 29.6 ms | 139.0 ms(123·155) | 118 / 214 MB | 16 B/점 | 0 회 |
+
+  - **선택: B1 = (a)**(감독 결정) — 측정 전에 고정한 규칙(지연 먼저)대로. 결과를 보고 규칙을 바꾸지 않는다.
+  - 그런데 어느 쪽도 모든 면에서 낫지 않다((a) 지연, (b) 멈춤 0 회·GPU 절반). 2 회 스모크로 한쪽을 버리면 "가장 강한 three.js" 를 놓칠 수 있으므로 **(b) 도 본 측정 대상 `three-b1b` 로 넣는다**(측정 전 계획 변경, 감독 허용). 몫 나누기의 "Rust·wgpu·wasm 의 몫" 은 **지표마다 B1a·B1b 중 더 좋은 쪽**을 기준으로 계산하고, 어느 쪽을 썼는지 칸에 적는다. B1a 만 쓴 표는 참고로 함께 둔다.
 - 청크 원점(f64)은 `Points.position` 으로.
 - 정밀 교체: 새 세대의 청크는 숨긴 그룹에 쌓고, 마지막 청크가 오면 보이게 하고 앞 세대를 `dispose` 한다(PointBlitz 와 같은 원칙, 0022).
 
 ### B1-webgpu 세부(되면 넣음)
-- three.js `WebGPURenderer`. WebGPU 의 점 프리미티브는 1 px 뿐이라(three.js `PointsNodeMaterial` 문서), 2 px 점은 `Sprite` + `PointsNodeMaterial` 인스턴싱(점마다 사각형)으로 그린다 — PointBlitz 도 WebGPU 에서 점마다 사각형을 그린다. 원판은 프래그먼트에서 반지름 밖을 버린다.
+- three.js `WebGPURenderer`. WebGPU 의 점 프리미티브는 1 px 뿐이라(three.js `PointsNodeMaterial` 문서), 2 px 점은 점마다 사각형 하나로 그린다 — PointBlitz 도 WebGPU 에서 점마다 사각형을 그린다. 원판은 프래그먼트에서 반지름 밖을 버린다(`opacityNode` + `alphaTest 0.5`).
+- 구현: 청크마다 `Mesh` + `InstancedBufferGeometry`(사각형 4 정점 + 인스턴스 속성 `instancePosition`·`instanceColor`), 재질은 **하나를 공유**하는 `PointsNodeMaterial`(속성을 이름으로 읽음). 문서 예처럼 `Sprite` 에 `instancedBufferAttribute` 를 묶으면 청크마다 재질(= 파이프라인 컴파일)이 생기므로 피했다.
 - 받기·올리기·교체는 B1 과 같다(올리기는 B1 스모크에서 이긴 방식).
 - 안 되면(인스턴스 속성 제약, 화면이 B0 과 다름 등) 이유를 이 결정에 적고 열을 뺀다.
 
@@ -57,10 +67,19 @@
 같은 스냅샷 바이트를 두고, B2 의 워커 해석 시간(`parse_end − fetch_end`, 스냅샷별·합계)과 서버의 Rust 변환 시간(같은 스냅샷의 `/chunks` 읽기·청크 만들기, 마지막 스냅샷 약 19 ms)을 표 각주에 나란히 싣는다. "Rust 가 해석을 빨리 한 몫" 이 보이게 한다.
 
 ## 확인(측정 전에 끝냄)
-- 단위 시험: B2 서버 차분(헤더 + 꼬리)이 `/chunks` 차분과 같은 점 범위인지, B2 워커 해석이 Rust `ply.rs` 와 같은 값인지(스냅샷 1·3).
-- 그림: 고정 시점 8곳에서 B1·B2 캡처 대 B0 캡처 SSIM ≥ 0.999(같은 three.js 그리기라 거의 같아야 함), 대 PointBlitz web 은 B0 과 같은 수준(0.9919 근처). B1-webgpu 는 대 PointBlitz web 0.99 이상이어야 넣는다.
+- 단위 시험: B2 서버 차분(헤더 + 꼬리, `ply_parts`)이 `/chunks` 와 같은 `chunks::plan` 판단·같은 점 범위인지(`cargo test`), B2 파서(`baseline/three/ply-parse.js`)의 값·차분·거부(`node --test`, check.sh·CI).
+- 그림: 고정 시점 8곳. B2 는 대 B0 캡처 SSIM ≥ 0.999. B1-webgpu 는 대 PointBlitz(native 캡처) 0.99 이상이어야 넣는다.
+  - **B1 의 기준은 측정 전에 바꿨다(감독 결정, 2026-10-09)**: 처음 기준 "대 B0 ≥ 0.999" 를 **"대 PointBlitz native SSIM ≥ B0 대 native 값(0.9919), 다른 픽셀 비율 ≤ B0 대 native 값(7.38 %)"** 으로. 이유: B1 은 PointBlitz 데이터 경로를 three.js 로 그리는 기준이라 그림의 기준점도 PointBlitz 가 맞다. B1 은 청크의 f64 원점 + f32 상대 좌표를 쓰고 B0 는 PLY 의 절대 f32 좌표라 2 px 점의 반올림 위치가 다르다. 측정값: B1 대 B0 0.9960, B1 대 native 0.9921(다른 픽셀 1.36 %), B0 대 native 0.9919(7.38 %). 원인 확인: B1 과 B0 가 다른 픽셀의 **100 %** 가 B0 점 영역을 1 px 넓힌 범위 안에 있다(west 149,080 / 149,080, overview_sw 164,077 / 164,077, close_dense 364,148 / 364,148) — 점 경계 1 px 이동.
 - B1 올리기 스모크((a)·(b)), 위 B1 세부.
 - 재생 동안 화면에 나온 점 수가 스냅샷 점 수와 같은지(`presented` 마크에 점 수).
+
+### 확인 결과(측정 전, 2026-10-09)
+| 확인 | B1 (a)·(b) | B1-webgpu | B2 |
+|---|---|---|---|
+| SSIM 대 native(평균, 8 시점) | 0.9921 / 다른 픽셀 1.36 % (west) — (a)·(b) 같은 그림 | **0.9964** | 0.9922 |
+| SSIM 대 B0 | 0.9960 (위 기준 변경) | 0.9929 | **0.9997** |
+| 재생 ×60: 14 스냅샷의 화면 점 수 = 스냅샷 점 수, 전달 full 8 · delta 6 | 맞음 | 맞음 | 맞음 |
+| 판정 | 넣음 | **넣음** | 넣음 |
 
 ## 대가
 - 공개 배율이 바뀐다(측정 뒤 README·보고서 갱신). 측정 중에는 "증분 없는 기준 대비" 라는 한 줄을 넣어 둔다.
