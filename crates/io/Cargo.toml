@@ -11,8 +11,6 @@ homepage.workspace = true
 documentation = "https://docs.rs/pointblitz-io"
 keywords = ["point-cloud", "ply", "streaming", "parser"]
 categories = ["parser-implementations", "graphics"]
-# Needs the skyrecon dev-dependency (git, not on crates.io), which publishing drops.
-exclude = ["tests/skyrecon_roundtrip.rs"]
 
 [dependencies]
 # Only with the `client` feature: event and manifest JSON in the replay client.
@@ -27,5 +25,4 @@ client = ["dep:serde_json"]
 [lints]
 workspace = true
 
-[dev-dependencies]
-skyrecon-core = { git = "https://github.com/AH100-1/skyrecon", rev = "9f8a0f5ea4e740aab22062e5d40b1f131a824dae" }
+# The skyrecon compatibility test lives in tools/skyrecon-compat (outside the workspace, decision 0046).

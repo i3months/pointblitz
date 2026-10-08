@@ -28,6 +28,10 @@ jobs:
         run: cargo build --workspace --all-targets
       - name: test
         run: cargo test --workspace
+      - name: dependencies resolve without any cache (decision 0046)
+        if: matrix.os == 'ubuntu-latest'
+        # A fresh CARGO_HOME: every dependency must be reachable, not just cached (the release job has no cache).
+        run: CARGO_HOME="$RUNNER_TEMP/fresh-cargo" cargo fetch --locked
       - name: crates.io packages (decision 0044)
         if: matrix.os == 'ubuntu-latest'
         run: cargo publish --workspace --exclude pointblitz-bench --dry-run

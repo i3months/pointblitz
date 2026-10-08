@@ -1,0 +1,15 @@
+# skyrecon PLY writer ↔ PointBlitz parser compatibility test (decisions 0014, 0023, 0046).
+# Outside the workspace on purpose: skyrecon-core is a git dependency that is not publicly
+# reachable (2026-10-08: the repository returns 404), so the workspace must not need it.
+# Run it where skyrecon is reachable:   cargo test --manifest-path tools/skyrecon-compat/Cargo.toml
+[package]
+name = "pointblitz-skyrecon-compat"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[dev-dependencies]
+pointblitz-io = { path = "../../crates/io" }
+skyrecon-core = { git = "https://github.com/AH100-1/skyrecon", rev = "9f8a0f5ea4e740aab22062e5d40b1f131a824dae" }
+
+[workspace]

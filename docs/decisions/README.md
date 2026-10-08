@@ -49,5 +49,6 @@
 | [0043](0043-linux-nvenc-second-machine.md) | Linux NVENC 와 두 번째 장비(V100 서버) 측정 — 비용 모델 두 장비 보정 | 승인 |
 | [0044](0044-crates-io-release.md) | crates.io 배포(라이브러리 + 실행 파일, 0.1.0)와 릴리스 CI | 승인(준비만, 배포는 소유자) |
 | [0045](0045-server-video-120fps.md) | 서버 영상 120 fps(선택지, 기본 60 fps) | 승인(선택지, 기본 60 fps) |
+| [0046](0046-unreachable-dev-dependency.md) | 도달할 수 없는 git 의존(skyrecon)을 워크스페이스에서 뺌, 캐시 없는 의존 확인 | 승인 |
 
 "제안" 상태는 작업자가 제안한 것이다. 감독 검토 또는 소유자 확인 뒤 "승인" 이 된다.
