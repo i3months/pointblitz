@@ -23,6 +23,7 @@
 //   setView(name), ready, done
 
 import { ChunkSplitter } from '/static/web/chunks.js';
+import { glTimer } from '/static/web/gltimer.js';
 
 const WIDTH = 1920;
 const HEIGHT = 1080;
@@ -51,7 +52,7 @@ new PerformanceObserver((list) => {
 const mark = (name, extra = {}) => pb.marks.push({ name, t: performance.now(), ...extra });
 
 const renderer = webgpu
-  ? new THREE.WebGPURenderer({ antialias: false })
+  ? new THREE.WebGPURenderer({ antialias: false, trackTimestamp: scenario === 'orbit' }) // timestamps: decision 0049
   : new THREE.WebGLRenderer({ antialias: false, preserveDrawingBuffer: true });
 renderer.setPixelRatio(1);
 renderer.setSize(WIDTH, HEIGHT);
@@ -435,22 +436,43 @@ async function main() {
       await waitFrames(3);
       stopLoop = true;
       await waitFrames(1);
+      // WebGPU (B1-webgpu): the same sync as PointBlitz web (decision 0049) — frames go to an
+      // offscreen target and its first pixel is copied and mapped (readRenderTargetPixelsAsync).
+      // WebGL2: the canvas readPixels above. GPU timestamps per batch: three.js trackTimestamp on
+      // WebGPU, EXT_disjoint_timer_query_webgl2 around the batch on WebGL2.
+      const target = webgpu ? new THREE.RenderTarget(WIDTH, HEIGHT, { depthBuffer: true }) : null;
+      const glt = webgpu ? null : glTimer(renderer.getContext());
+      pb.gpuTimer = webgpu ? 'three.js trackTimestamp (WebGPU timestamp-query), render passes of the batch' : glt ? 'EXT_disjoint_timer_query_webgl2 TIME_ELAPSED around the batch' : 'none: EXT_disjoint_timer_query_webgl2 not exposed';
+      if (target) renderer.setRenderTarget(target);
+      if (webgpu) await renderer.resolveTimestampsAsync('render'); // drop what earlier frames recorded
       mark('sync_start');
       for (const v of viewpoints) {
         setView(v.name);
         // batch=N (P4.1 diagnosis): N frames back to back, one sync, per-frame averages — the
         // sync's own cost is spread over N frames, so implementations compare without it.
         for (let k = 0; k < framesPerView; k += batch) {
+          const frame = { view: v.name, batch };
+          const query = glt?.begin();
           const t0 = performance.now();
           for (let j = 0; j < batch; j++) renderer.render(scene, camera);
           const t1 = performance.now();
-          const wait = gpuDone();
-          if (wait) await wait;
+          if (query) glt.end(query, batch, frame);
+          if (target) {
+            await renderer.readRenderTargetPixelsAsync(target, 0, 0, 1, 1);
+          } else {
+            const wait = gpuDone();
+            if (wait) await wait;
+          }
           const t2 = performance.now();
-          pb.syncFrames.push({ view: v.name, cpu: (t1 - t0) / batch, ms: (t2 - t0) / batch, batch });
+          frame.cpu = (t1 - t0) / batch;
+          frame.ms = (t2 - t0) / batch;
+          if (webgpu) frame.gpu = (await renderer.resolveTimestampsAsync('render')) / batch; // after t2
+          pb.syncFrames.push(frame);
         }
       }
       mark('sync_end');
+      if (target) renderer.setRenderTarget(null);
+      if (glt && !(await glt.finish())) pb.gpuTimer += ' (some results never arrived)';
       stopLoop = false;
       dirty = true;
       requestAnimationFrame(frame);

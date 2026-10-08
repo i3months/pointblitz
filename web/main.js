@@ -18,6 +18,7 @@
 // first_chunk, last_chunk_received, uploaded, submitted, presented, fetch_end.
 
 import { ChunkSplitter } from './chunks.js';
+import { glTimer } from './gltimer.js';
 
 const params = new URLSearchParams(location.search);
 const scenario = params.get('scenario') ?? 'still';
@@ -232,14 +233,23 @@ async function orbit() {
   // glsync=canvas: the old WebGL2 sync, for the before/after check only (decision 0049).
   const gl = pb.info.backend === 'Gl' && params.get('glsync') === 'canvas' ? document.getElementById('view').getContext('webgl2') : null;
   const syncPixel = new Uint8Array(4);
+  // GPU timestamps per batch (decision 0049): pass timestamps on WebGPU, EXT_disjoint_timer_query_webgl2
+  // on WebGL2 (wgpu's GL backend has no timestamp queries but issues its GL calls inside submit).
+  const glt = pb.info.backend === 'Gl' ? glTimer(document.getElementById('view').getContext('webgl2')) : null;
+  const passTimer = !glt && viewer.gpu_timer_start(batch);
+  pb.gpuTimer = glt ? 'EXT_disjoint_timer_query_webgl2 TIME_ELAPSED around the batch' : passTimer ? 'WebGPU timestamp-query, render pass begin/end' : 'none: no timestamp query on this device';
   mark('sync_start');
   for (const v of viewpoints) {
     viewer.set_camera(new Float64Array(v.eye), new Float64Array(v.target), new Float64Array(v.up), fov);
     // batch=N (P4.1 diagnosis): N frames back to back, one sync, per-frame averages.
     for (let k = 0; k < framesPerView; k += batch) {
+      const frame = { view: v.name, batch };
+      if (passTimer) viewer.gpu_timer_start(batch);
+      const query = glt?.begin();
       const t0 = performance.now();
       for (let j = 0; j < batch; j++) viewer.render_offscreen();
       const t1 = performance.now();
+      if (query) glt.end(query, batch, frame);
       if (gl) {
         // glsync=canvas only: read the default framebuffer, then restore wgpu's binding.
         const bound = gl.getParameter(gl.READ_FRAMEBUFFER_BINDING);
@@ -250,11 +260,15 @@ async function orbit() {
         await viewer.readback_done();
       }
       const t2 = performance.now();
-      pb.syncFrames.push({ view: v.name, cpu: (t1 - t0) / batch, ms: (t2 - t0) / batch, batch });
+      frame.cpu = (t1 - t0) / batch;
+      frame.ms = (t2 - t0) / batch;
+      if (passTimer) frame.gpu = await viewer.gpu_timer_read(); // after t2: not part of ms
+      pb.syncFrames.push(frame);
       if (params.get('stages') === '1') pb.stages.push(viewer.last_stages()); // P4.2: last frame of the batch
     }
   }
   mark('sync_end');
+  if (glt && !(await glt.finish())) pb.gpuTimer += ' (some results never arrived)';
   stopLoop = false;
 }
 

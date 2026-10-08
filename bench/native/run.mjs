@@ -73,7 +73,9 @@ const raw = {
   frames: by('frames')[0]?.t ?? [],
   presentClock: by('present_clock')[0]?.t ?? [],
   longtasks: [],
-  syncFrames: by('sync_frame').map((f) => ({ view: f.view, cpu: f.cpu, ms: f.ms })),
+  syncFrames: by('sync_frame').map((f) => ({ view: f.view, cpu: f.cpu, ms: f.ms, gpu: f.gpu })),
+  // Decision 0049: the native client writes pass timestamps when the adapter has TIMESTAMP_QUERY.
+  gpuTimer: by('sync_frame').some((f) => f.gpu != null) ? 'wgpu TIMESTAMP_QUERY, render pass begin/end' : by('sync_frame').length ? 'none: adapter without TIMESTAMP_QUERY' : undefined,
   proc: { renderer: samples[child.pid] ?? [], gpu: [] },
   peak: { renderer: peak, method: 'OS peak commit of the native process (PeakPagefileUsage)' },
   native: { uploaded: by('uploaded'), delivered: by('delivered'), display: by('display')[0] },

@@ -125,6 +125,13 @@ export function summarize(raw, { device, commit, target = 'three.js' }) {
       const s = values.sort((a, b) => a - b);
       for (const q of [0.5, 0.95, 0.99]) out.push(rec(`${name}_p${Math.round(q * 100)}`, percentile(s, q), 'ms', s.length));
     }
+    // GPU time per frame from GPU timestamps (decision 0049): pass timestamps (WebGPU, native) or
+    // EXT_disjoint_timer_query_webgl2 around the batch (WebGL2). Batches without a value are skipped.
+    const gpu = sync.map((f) => f.gpu).filter((g) => typeof g === 'number' && Number.isFinite(g)).sort((a, b) => a - b);
+    if (gpu.length) {
+      for (const q of [0.5, 0.95, 0.99]) out.push(rec(`frame_time_gpu_timestamp_p${Math.round(q * 100)}`, percentile(gpu, q), 'ms', gpu.length));
+    }
+    if (raw.gpuTimer) out.push(rec('gpu_timer', gpu.length, 'count', gpu.length, { method: raw.gpuTimer }));
     for (const view of [...new Set(sync.map((f) => f.view))]) {
       const v = sync.filter((f) => f.view === view).map((f) => f.ms).sort((a, b) => a - b);
       out.push(rec('frame_time_total_p50_view', percentile(v, 0.5), 'ms', v.length, { view }));

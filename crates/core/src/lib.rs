@@ -7,8 +7,10 @@ pub mod camera;
 pub mod headless;
 pub mod renderer;
 pub mod scene;
+pub mod timer;
 
 pub use camera::Camera;
 pub use headless::Headless;
 pub use renderer::Renderer;
 pub use scene::{Inserted, Scene};
+pub use timer::GpuTimer;

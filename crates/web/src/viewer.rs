@@ -3,7 +3,9 @@
 use crate::json_str;
 use crate::oneshot::Signal;
 use pointblitz_core::renderer::DEPTH_FORMAT;
-use pointblitz_core::{Camera, Inserted, Renderer, Scene};
+use pointblitz_core::{Camera, GpuTimer, Inserted, Renderer, Scene};
+use std::cell::RefCell;
+use std::rc::Rc;
 use wasm_bindgen::prelude::*;
 
 #[wasm_bindgen]
@@ -27,6 +29,10 @@ pub struct Viewer {
     /// copy makes the GL work run inside submit; without it the same work runs at the page's
     /// readPixels and frames got slower (P4.2: p50 4.2 → 6.2 ms), so it stays on there too.
     readback_copy: bool,
+    /// GPU timestamps of the offscreen frames (decision 0049), when the device has them.
+    timer: Rc<RefCell<Option<GpuTimer>>>,
+    /// The next offscreen frames are timed (between `gpu_timer_start` and `gpu_timer_read`).
+    timing: bool,
 }
 
 fn err(what: &str, e: impl std::fmt::Display) -> JsValue {
@@ -105,6 +111,12 @@ impl Viewer {
                 },
                 // WebGL2 cannot meet wgpu's default limits; ask only for what WebGL2 guarantees,
                 // raised to the adapter's texture sizes.
+                // GPU timestamps for the orbit frames when the adapter has them (decision 0049).
+                required_features: if webgpu {
+                    adapter.features() & wgpu::Features::TIMESTAMP_QUERY
+                } else {
+                    wgpu::Features::empty()
+                },
                 required_limits: if webgpu {
                     wgpu::Limits::default()
                 } else {
@@ -147,6 +159,8 @@ impl Viewer {
             readback: None,
             stages: [0.0; 4],
             readback_copy: true,
+            timer: Rc::new(RefCell::new(None)),
+            timing: false,
         })
     }
 
@@ -219,6 +233,11 @@ impl Viewer {
         let mut enc = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
+        if self.timing
+            && let Some(t) = self.timer.borrow_mut().as_mut()
+        {
+            t.next(&mut self.renderer);
+        }
         self.renderer.render(
             &self.device,
             &self.queue,
@@ -254,6 +273,47 @@ impl Viewer {
         self.queue.submit([commands]);
         let t4 = now();
         self.stages = [t1 - t0, t2 - t1, t3 - t2, t4 - t3];
+    }
+
+    /// Times the next `frames` offscreen frames with GPU timestamps (decision 0049). False when the
+    /// device has no timestamp queries (WebGL2, or an adapter without them).
+    pub fn gpu_timer_start(&mut self, frames: u32) -> bool {
+        let mut timer = self.timer.borrow_mut();
+        if timer.is_none() {
+            *timer = GpuTimer::new(&self.device, &self.queue, frames);
+        }
+        self.timing = timer.is_some();
+        self.timing
+    }
+
+    /// Resolves to the GPU time per timed frame, ms (sum of the pass times ÷ frames), and stops
+    /// timing. Call after the frames were submitted (for example after `readback_done`).
+    pub fn gpu_timer_read(&mut self) -> js_sys::Promise {
+        self.timing = false;
+        let timer = Rc::clone(&self.timer);
+        let readback = {
+            let mut t = timer.borrow_mut();
+            let Some(t) = t.as_mut() else {
+                return js_sys::Promise::reject(&JsValue::from_str("no GPU timer"));
+            };
+            let mut enc = self
+                .device
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
+            t.resolve(&mut self.renderer, &mut enc);
+            self.queue.submit([enc.finish()]);
+            t.readback().clone()
+        };
+        let signal = Signal::default();
+        let fire = signal.clone();
+        readback.map_async(wgpu::MapMode::Read, .., move |_| fire.fire());
+        wasm_bindgen_futures::future_to_promise(async move {
+            signal.await;
+            let (total, n) = timer
+                .borrow_mut()
+                .as_mut()
+                .map_or((0.0, 0), GpuTimer::take_ms);
+            Ok(JsValue::from_f64(total / f64::from(n.max(1))))
+        })
     }
 
     /// A/B switch for the readback copy (P4.2).

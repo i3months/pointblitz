@@ -12,4 +12,4 @@
 pub use pointblitz_core as core;
 pub use pointblitz_io as io;
 
-pub use pointblitz_core::{Camera, Headless, Inserted, Renderer, Scene};
+pub use pointblitz_core::{Camera, GpuTimer, Headless, Inserted, Renderer, Scene};

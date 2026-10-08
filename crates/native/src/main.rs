@@ -21,7 +21,7 @@
 //! GPU is done).
 
 use pointblitz_core::renderer::DEPTH_FORMAT;
-use pointblitz_core::{Camera, Inserted, Renderer, Scene};
+use pointblitz_core::{Camera, GpuTimer, Inserted, Renderer, Scene};
 use pointblitz_io::client::{self as net, Msg};
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
@@ -213,6 +213,8 @@ impl Gpu {
         );
         let (device, queue) = block_on(adapter.request_device(&wgpu::DeviceDescriptor {
             memory_hints,
+            // GPU timestamps for the orbit frames when the adapter has them (decision 0049).
+            required_features: adapter.features() & wgpu::Features::TIMESTAMP_QUERY,
             ..Default::default()
         }))
         .map_err(|e| e.to_string())?;
@@ -581,6 +583,8 @@ impl App {
             .create_view(&wgpu::TextureViewDescriptor::default());
         // --batch N (P4.1 diagnosis): N frames back to back, one sync, per-frame averages.
         let batch = self.args.batch.max(1);
+        // GPU time of each batch from pass timestamps (decision 0049), read after the sync was timed.
+        let mut timer = GpuTimer::new(&gpu.device, &gpu.queue, batch as u32);
         self.marks.add("sync_start", Instant::now(), "");
         for (name, cam) in &self.views {
             for _ in (0..FRAMES_PER_VIEW).step_by(batch) {
@@ -590,6 +594,9 @@ impl App {
                     let mut enc = gpu
                         .device
                         .create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
+                    if let Some(t) = timer.as_mut() {
+                        t.next(&mut gpu.renderer);
+                    }
                     gpu.renderer.render(
                         &gpu.device,
                         &gpu.queue,
@@ -608,10 +615,22 @@ impl App {
                     timeout: None,
                 });
                 let t2 = Instant::now();
+                let gpu_ms = timer.as_mut().map(|t| {
+                    let mut enc = gpu
+                        .device
+                        .create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
+                    t.resolve(&mut gpu.renderer, &mut enc);
+                    gpu.queue.submit([enc.finish()]);
+                    t.readback().map_async(wgpu::MapMode::Read, .., |_| {});
+                    let _ = gpu.device.poll(wgpu::PollType::wait_indefinitely());
+                    let (total, n) = t.take_ms();
+                    total / f64::from(n.max(1))
+                });
                 let ms = |a: Instant, b: Instant| b.duration_since(a).as_secs_f64() * 1e3;
+                let gpu_field = gpu_ms.map_or(String::new(), |g| format!(",\"gpu\":{g:.4}"));
                 writeln!(
                     self.marks.lines,
-                    "{{\"name\":\"sync_frame\",\"view\":\"{name}\",\"cpu\":{:.4},\"ms\":{:.4},\"batch\":{batch}}}",
+                    "{{\"name\":\"sync_frame\",\"view\":\"{name}\",\"cpu\":{:.4},\"ms\":{:.4},\"batch\":{batch}{gpu_field}}}",
                     ms(t0, t1) / batch as f64,
                     ms(t0, t2) / batch as f64
                 )
