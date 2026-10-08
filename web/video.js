@@ -20,6 +20,9 @@ const pb = (window.__pb = {
   syncFrames: [],
   inputs: [],
   decodeMs: [], // message received → decoded frame out, per frame
+  // P4.3 diagnosis: per frame [server tick ms, received, drawn] and frames drawn per display cycle.
+  frameTimes: [],
+  cycleDraws: [],
   cycles: { total: 0, missed: 0 },
   ready: false,
   done: false,
@@ -36,6 +39,7 @@ const metaByFrame = new Map();
 let decoder = null;
 let bytes = 0;
 let drawnSinceCycle = false;
+let drawnThisCycle = 0;
 let streaming = false;
 let drawnCount = 0;
 const viewWaiters = [];
@@ -72,6 +76,8 @@ function onFrame(frame) {
   frame.close();
   const t = performance.now();
   drawnSinceCycle = true;
+  drawnThisCycle++;
+  if (meta) pb.frameTimes.push([meta.t_ms, meta.rx, t]);
   if (!meta) return;
   // Frame-drop window (P3.4, supervisor decision): from the first drawn frame to the end of the
   // orbit — the server marks frames after it as phase "done".
@@ -124,8 +130,10 @@ function cycle(t) {
   if (streaming) {
     pb.cycles.total++;
     if (!drawnSinceCycle) pb.cycles.missed++;
+    pb.cycleDraws.push(drawnThisCycle);
   }
   drawnSinceCycle = false;
+  drawnThisCycle = 0;
   requestAnimationFrame(cycle);
 }
 
