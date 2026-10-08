@@ -14,8 +14,11 @@ The same render core runs in three places:
 It is built for people who hit the limits of three.js with large point clouds:
 full-file downloads before the first frame, main-thread parsing, and re-uploading the whole cloud every time it grows.
 
-> **Status: design phase.** Nothing is benchmarked yet. Every performance number will come with the
-> dataset, viewpoints, hardware and commit it was measured on.
+> **Status: measuring.** The native, browser (WebGPU/WebGL2) and server-video targets are built and
+> being measured against the three.js baseline on one machine — working reports are in
+> [docs/bench/](docs/bench/). A public comparison table is in preparation; until then, no performance
+> claims are made here. Every number will come with the dataset, viewpoints, hardware and commit it
+> was measured on.
 
 ## Why
 
