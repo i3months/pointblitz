@@ -3,7 +3,7 @@
 - 날짜: 2026-10-08
 - 근거: [comparison.md](comparison.md)(P4.6 같은 세션 비교), [baseline-three.md](baseline-three.md), [diagnostics.md](diagnostics.md), [server-video.md](server-video.md), [cost-model.md](cost-model.md), [validity-audit.md](validity-audit.md)
 
-> **무엇과 비교했나.** 실제 운영 중인 시스템과의 비교가 아닙니다. SkyLens 와 skyrecon 은 지금 이 점군을 화면에 표시하지 않습니다. 기준(**three.js 기준 방식**)은 SkyLens 가 쓰는 three.js 0.185 로 같은 점군을 가장 흔한 방법 — PLY 전체 받기 → 메인 스레드 해석 → `THREE.Points`, 매 프레임 그림 — 으로 보여 준 것입니다([결정 0005](../decisions/0005-baseline-definition.md)). 잘 최적화한 three.js(워커 해석·증분 갱신)와는 아직 비교하지 않았습니다.
+> **무엇과 비교했나.** 실제 운영 중인 시스템과의 비교가 아닙니다. SkyLens 와 skyrecon 은 지금 이 점군을 화면에 표시하지 않습니다. 기준(**three.js 기준 방식**)은 SkyLens 가 쓰는 three.js 0.185 로 같은 점군을 가장 흔한 방법 — PLY 전체 받기 → 메인 스레드 해석 → `THREE.Points`, 매 프레임 그림 — 으로 보여 준 것입니다([결정 0005](../decisions/0005-baseline-definition.md)). **증분 three.js 기준(B1: 같은 청크 경로의 three.js, B2: SkyLens 식 증분 PLY·워커 해석, [결정 0048](../decisions/0048-incremental-baselines.md))과의 비교를 측정 중입니다 — 아래 배율은 증분 없는 기준 대비입니다.**
 > 그리는 GPU: three.js 기준 방식과 PointBlitz native·브라우저는 사용자 GPU 가 그리고, 서버 영상만 서버 GPU 가 그립니다. 재생 서버는 CPU 로 청크만 만듭니다(이번 측정은 모두 한 PC).
 
 **새 데이터가 화면에 나오기까지 걸리는 시간이 three.js 기준 방식보다 미리보기(preview)는 13–23배, 정밀 스냅샷(refined)과 첫 화면(cold)은 5–7배 짧아졌습니다.** 같은 데이터를 받는 양은 66 % 줄었고(서버 영상은 98 %), 브라우저 메인 스레드 멈춤은 14 회에서 0 회로, 브라우저 렌더러 메모리는 965 MB 에서 166–215 MB 로 줄었습니다.
