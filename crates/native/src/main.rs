@@ -47,6 +47,8 @@ struct Args {
     /// After the run, print `finished` on stderr and wait for a line on stdin before exiting, so a
     /// harness can read the process's OS peak memory while it still exists (decision 0032).
     wait_before_exit: bool,
+    /// Orbit: frames submitted per synchronisation (P4.1 diagnosis; 1 = every frame, decision 0020).
+    batch: usize,
     /// wgpu allocator preference: memory (default, P1.5) or speed (wgpu's default, A/B).
     memory_hints: wgpu::MemoryHints,
     /// Draw every frame (A/B) instead of only when something changed.
@@ -65,6 +67,7 @@ fn parse_args() -> Result<Args, String> {
         marks: None,
         exit_on_end: false,
         wait_before_exit: false,
+        batch: 1,
         memory_hints: wgpu::MemoryHints::MemoryUsage,
         continuous: false,
     };
@@ -89,6 +92,7 @@ fn parse_args() -> Result<Args, String> {
             "--marks" => a.marks = Some(val()?),
             "--exit-on-end" => a.exit_on_end = true,
             "--wait-before-exit" => a.wait_before_exit = true,
+            "--batch" => a.batch = val()?.parse().map_err(|_| "--batch")?,
             "--continuous" => a.continuous = true,
             "--memory-hints" => {
                 a.memory_hints = match val()?.as_str() {
@@ -525,36 +529,41 @@ impl App {
                 view_formats: &[],
             })
             .create_view(&wgpu::TextureViewDescriptor::default());
+        // --batch N (P4.1 diagnosis): N frames back to back, one sync, per-frame averages.
+        let batch = self.args.batch.max(1);
         self.marks.add("sync_start", Instant::now(), "");
         for (name, cam) in &self.views {
-            for _ in 0..FRAMES_PER_VIEW {
+            for _ in (0..FRAMES_PER_VIEW).step_by(batch) {
                 let t0 = Instant::now();
-                let mut enc = gpu
-                    .device
-                    .create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
-                gpu.renderer.render(
-                    &gpu.device,
-                    &gpu.queue,
-                    &mut enc,
-                    &color,
-                    &gpu.depth,
-                    size,
-                    cam,
-                    &self.scene,
-                );
-                let index = gpu.queue.submit([enc.finish()]);
+                let mut index = None;
+                for _ in 0..batch {
+                    let mut enc = gpu
+                        .device
+                        .create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
+                    gpu.renderer.render(
+                        &gpu.device,
+                        &gpu.queue,
+                        &mut enc,
+                        &color,
+                        &gpu.depth,
+                        size,
+                        cam,
+                        &self.scene,
+                    );
+                    index = Some(gpu.queue.submit([enc.finish()]));
+                }
                 let t1 = Instant::now();
                 let _ = gpu.device.poll(wgpu::PollType::Wait {
-                    submission_index: Some(index),
+                    submission_index: index,
                     timeout: None,
                 });
                 let t2 = Instant::now();
                 let ms = |a: Instant, b: Instant| b.duration_since(a).as_secs_f64() * 1e3;
                 writeln!(
                     self.marks.lines,
-                    "{{\"name\":\"sync_frame\",\"view\":\"{name}\",\"cpu\":{:.4},\"ms\":{:.4}}}",
-                    ms(t0, t1),
-                    ms(t0, t2)
+                    "{{\"name\":\"sync_frame\",\"view\":\"{name}\",\"cpu\":{:.4},\"ms\":{:.4},\"batch\":{batch}}}",
+                    ms(t0, t1) / batch as f64,
+                    ms(t0, t2) / batch as f64
                 )
                 .unwrap();
             }

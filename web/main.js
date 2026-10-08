@@ -178,6 +178,7 @@ async function cold(manifest) {
 // readPixels; the asynchronous resolution makes total an upper bound.
 async function orbit() {
   const framesPerView = Number(params.get('frames') ?? 120);
+  const batch = Math.max(1, Number(params.get('batch') ?? 1));
   for (let i = 0; i < 3; i++) await redraw(); // let the swapped snapshot reach the screen first
   stopLoop = true;
   const gl = pb.info.backend === 'Gl' ? document.getElementById('view').getContext('webgl2') : null;
@@ -185,9 +186,10 @@ async function orbit() {
   mark('sync_start');
   for (const v of viewpoints) {
     viewer.set_camera(new Float64Array(v.eye), new Float64Array(v.target), new Float64Array(v.up), fov);
-    for (let k = 0; k < framesPerView; k++) {
+    // batch=N (P4.1 diagnosis): N frames back to back, one sync, per-frame averages.
+    for (let k = 0; k < framesPerView; k += batch) {
       const t0 = performance.now();
-      viewer.render_offscreen();
+      for (let j = 0; j < batch; j++) viewer.render_offscreen();
       const t1 = performance.now();
       if (gl) {
         // Read from the default framebuffer, then restore wgpu's binding.
@@ -199,7 +201,7 @@ async function orbit() {
         await viewer.readback_done();
       }
       const t2 = performance.now();
-      pb.syncFrames.push({ view: v.name, cpu: t1 - t0, ms: t2 - t0 });
+      pb.syncFrames.push({ view: v.name, cpu: (t1 - t0) / batch, ms: (t2 - t0) / batch, batch });
     }
   }
   mark('sync_end');
