@@ -9,6 +9,12 @@
 #
 # Starts a renamed copy of the replay server and stops it by PID. Writes <impl>-<scenario>-<i>.jsonl
 # and the aggregated table (table.md).
+#
+# Validity (decisions 0038, 0040, 0041): every run goes through bench/gpu-watch.mjs (which starts
+# bench/measure-env.ps1). A run that fails, or is invalid under C1/C3/C4 (bench/valid.mjs), is redone
+# once with the same settings; the first attempt's files are kept as <run>.try1-failed.* /
+# <run>.try1-invalid.* and every attempt is listed in runs.log. C2 is checked at the end
+# (bench/contamination.mjs --apply).
 set -euo pipefail
 
 DATA=${1:?ply dir}
@@ -33,7 +39,8 @@ ABS_OUT=$(cd "$OUT" && pwd)
 "$BIN" replay --data "$DATA" --web . --port "$PORT" > "$ABS_OUT/server.log" 2> "$ABS_OUT/server.err" &
 SERVER=$!
 # Git Bash: $! is an MSYS pid; stop the Windows process by its own pid as well.
-stop_server() { local w; w=$(cat "/proc/$SERVER/winpid" 2>/dev/null); kill "$SERVER" 2>/dev/null; [ -n "$w" ] && taskkill //F //PID "$w" > /dev/null 2>&1; true; }
+# (`|| true`: under set -e a failing kill in the EXIT trap made the suite exit 1 after a complete run.)
+stop_server() { local w; w=$(cat "/proc/$SERVER/winpid" 2>/dev/null || true); kill "$SERVER" 2>/dev/null || true; if [ -n "$w" ]; then taskkill //F //PID "$w" > /dev/null 2>&1 || true; fi; }
 trap stop_server EXIT
 sleep 3 # the server reads every snapshot once at startup (decision 0026)
 
@@ -50,11 +57,29 @@ run() { # impl scenario speed index
     native) cmd=(node bench/native/run.mjs --server "$URL" --scenario "$scen" --speed "$speed" --exe "target/release/pointblitz-native$EXT" --metrics "$ABS_OUT/$name.jsonl") ;;
     video) cmd=(node bench/video/run.mjs --server "$URL" --port "$VIDEO_PORT" --scenario "$scen" --speed "$speed" --exe "target/release/pb-suite-serve$EXT" --metrics "$ABS_OUT/$name.jsonl" --log "$ABS_OUT/$name.server.log") ;;
   esac
-  # GPU state before and during every run (decision 0038).
-  node bench/gpu-watch.mjs --out "$ABS_OUT/$name.gpu.csv" -- "${cmd[@]}" > /dev/null
+  # GPU and CPU state and display clock for every run; one redo of a failed or invalid run.
+  local try r
+  for try in 1 2; do
+    if ! node bench/gpu-watch.mjs --out "$ABS_OUT/$name.gpu.csv" -- "${cmd[@]}" > /dev/null 2>> "$ABS_OUT/errors.log"; then
+      r="failed"
+    elif r=$(node bench/valid.mjs "$ABS_OUT" "$name"); then
+      echo "$(date +%H:%M:%S) $name try $try: $r" >> "$ABS_OUT/runs.log"
+      return 0
+    else
+      r="invalid ($r)"
+    fi
+    echo "$(date +%H:%M:%S) $name try $try: $r" >> "$ABS_OUT/runs.log"
+    local f
+    for f in "$ABS_OUT/$name".*; do
+      case $f in *"/$name.try"[0-9]*) continue ;; esac # an earlier attempt, already kept
+      [ -e "$f" ] && mv "$f" "${f/$name./$name.try$try-${r%% *}.}"
+    done
+  done
+  return 0
 }
 for i in $(seq 1 "$COLD"); do for impl in $IMPLS; do run "$impl" cold 60 "$i"; done; done
 for i in $(seq 1 "$ORBIT"); do for impl in $IMPLS; do run "$impl" orbit 60 "$i"; done; done
 for i in $(seq 1 "$X60"); do for impl in $IMPLS; do run "$impl" replay 60 "$i"; done; done
 for i in $(seq 1 "$X1"); do for impl in $IMPLS; do run "$impl" replay 1 "$i"; done; done
+node bench/contamination.mjs "$ABS_OUT" --apply
 node baseline/three/aggregate.mjs "$ABS_OUT" --md "$ABS_OUT/table.md"
