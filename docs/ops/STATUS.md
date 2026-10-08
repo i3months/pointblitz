@@ -1,9 +1,9 @@
 # STATUS
 
 - 상태: 진행 중
-- 현재 작업: P4.1 진단 — browser frame_time(작업자)
+- 현재 작업: P4.3 진단 — server video 클라이언트 쪽 프레임 빠짐(작업자)
 - 마지막 갱신: 2026-10-08 (UTC)
-- 방금 한 일: PR #29 TASKS P4 쪼개기 병합(`d7d4b7f`, [검토](reviews/pr-29.md)). 그 전: PR #28 P3.4(`4f6ca7f`) — P3 완료
+- 방금 한 일: PR #32 P4.2 WebGL2 꼬리 진단 병합(`c79d43b`, [검토](reviews/pr-32.md)). 그 전: PR #30 P4.1(`d38dbd5`, browser frame_time 미달은 동기화 비용으로 확인), PR #31 README 상태
 - SPEC §7.1 판정 요약:
   - native: preview·refined·cold·frame_time 통과
   - browser WebGPU(기본·전용): preview·refined·cold·main_thread_block 통과, **frame_time 미달**
