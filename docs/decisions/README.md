@@ -38,6 +38,6 @@
 | [0032](0032-mem-cpu-os-peak.md) | mem_cpu = OS 최대 commit(0020 메모리 행 대체) | 승인 |
 | [0033](0033-browser-measurement.md) | 브라우저 측정 방법(화면 밖 동기화 프레임, 읽기 동기화)과 WebGPU 전용 모듈 | 승인 |
 | [0034](0034-memory-hints-speed-first.md) | 메모리 할당 설정은 속도로 고른다(0027 2번 대체) | 승인 |
-| [0035](0035-nvenc-direct.md) | 인코더 경로: NVENC 직접 호출(드라이버 DLL 실행 때 로드, 바인딩 MIT) | 제안 |
+| [0035](0035-nvenc-direct.md) | 인코더 경로: NVENC 직접 호출(드라이버 DLL 실행 때 로드, 바인딩 MIT) | 승인 |
 
 "제안" 상태는 작업자가 제안한 것이다. 감독 검토 또는 소유자 확인 뒤 "승인" 이 된다.
