@@ -20,11 +20,9 @@
 //! un-presented canvas frames): `sync_frame` lines with `cpu` (encode + submit) and `ms` (until the
 //! GPU is done).
 
-mod net;
-
-use net::Msg;
 use pointblitz_core::renderer::DEPTH_FORMAT;
 use pointblitz_core::{Camera, Inserted, Renderer, Scene};
+use pointblitz_io::client::{self as net, Msg};
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::sync::Arc;

@@ -1,13 +1,12 @@
-//! Replay-server client: SSE events and chunk deliveries over plain HTTP/1.1 (std only).
+//! Replay-server client: SSE events and chunk deliveries over plain HTTP/1.1 (std only). Shared by
+//! the native viewer and the video server (P3.2); not built for wasm (the browser uses fetch).
 //!
 //! Two threads, so a delivery in progress never delays the timestamp of the next event:
 //! - the event thread reads `/events` and stamps each snapshot the moment its line arrives;
 //! - the fetch thread takes snapshots in order and streams `/chunks/<seq>`, forwarding every chunk
 //!   as soon as its bytes are complete (decision 0026).
 
-use pointblitz_io::chunk::{
-    FLAG_LAST_IN_GENERATION, HEADER_LEN, MAGIC, POINT_STRIDE, decode_header,
-};
+use crate::chunk::{FLAG_LAST_IN_GENERATION, HEADER_LEN, MAGIC, POINT_STRIDE, decode_header};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
 use std::sync::mpsc;
@@ -261,8 +260,8 @@ pub fn spawn_cold(host: String, send: impl Fn(Msg) + Send + Sync + 'static) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pointblitz_io::Point;
-    use pointblitz_io::chunk::encode;
+    use crate::Point;
+    use crate::chunk::encode;
 
     #[test]
     fn reads_back_to_back_chunks_until_the_end() {
