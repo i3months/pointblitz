@@ -19,7 +19,7 @@ full-file downloads before the first frame, main-thread parsing, and re-uploadin
 > validity rules C1–C4. Full table, conditions and footnotes: [docs/bench/comparison.md](docs/bench/comparison.md).
 > Other hardware is estimated with a cost model, not measured ([docs/bench/cost-model.md](docs/bench/cost-model.md)).
 
-> **What the baseline is.** This is not a comparison with a deployed system: SkyLens and skyrecon do not display this point cloud today. The **three.js baseline** shows the same point cloud the most common way with three.js 0.185 (the version SkyLens uses) — download the whole PLY, parse it on the main thread, draw it as `THREE.Points` every frame ([decision 0005](docs/decisions/0005-baseline-definition.md)). A well-optimised three.js viewer (worker parsing, incremental updates) has not been compared yet.
+> **What the baseline is.** This is not a comparison with a deployed system: SkyLens and skyrecon do not display this point cloud today. The **three.js baseline** shows the same point cloud the most common way with three.js 0.185 (the version SkyLens uses) — download the whole PLY, parse it on the main thread, draw it as `THREE.Points` every frame ([decision 0005](docs/decisions/0005-baseline-definition.md)). **A comparison with incremental three.js baselines (B1: three.js on the same chunk stream; B2: SkyLens-style incremental PLY with worker parsing; [decision 0048](docs/decisions/0048-incremental-baselines.md)) is being measured — the ratios below are against the non-incremental baseline.**
 > Which GPU draws: the three.js baseline and PointBlitz native / browser draw on the user's GPU; only server video draws on the server's GPU. The replay server only builds chunks on the CPU (all on one PC in these measurements).
 
 ## Results (reference dataset flight-01, 2.5 M points at the end, median of 3–5 runs)
@@ -124,7 +124,7 @@ PointBlitz 는 Rust + wgpu 로 만드는 점군 렌더러입니다. 같은 렌�
 
 **첫 결과(2026-10-08, 한 PC 같은 세션, 측정 유효성 규칙 C1–C4)** — 자세한 표·조건·각주는 [docs/bench/comparison.md](docs/bench/comparison.md), 무엇이 왜 좋아졌는지는 [성능 보고서](docs/bench/report.md).
 
-> **무엇과 비교했나.** 실제 운영 중인 시스템과의 비교가 아닙니다. SkyLens 와 skyrecon 은 지금 이 점군을 화면에 표시하지 않습니다. 기준(**three.js 기준 방식**)은 SkyLens 가 쓰는 three.js 0.185 로 같은 점군을 가장 흔한 방법 — PLY 전체 받기 → 메인 스레드 해석 → `THREE.Points`, 매 프레임 그림 — 으로 보여 준 것입니다([결정 0005](docs/decisions/0005-baseline-definition.md)). 잘 최적화한 three.js(워커 해석·증분 갱신)와는 아직 비교하지 않았습니다.
+> **무엇과 비교했나.** 실제 운영 중인 시스템과의 비교가 아닙니다. SkyLens 와 skyrecon 은 지금 이 점군을 화면에 표시하지 않습니다. 기준(**three.js 기준 방식**)은 SkyLens 가 쓰는 three.js 0.185 로 같은 점군을 가장 흔한 방법 — PLY 전체 받기 → 메인 스레드 해석 → `THREE.Points`, 매 프레임 그림 — 으로 보여 준 것입니다([결정 0005](docs/decisions/0005-baseline-definition.md)). **증분 three.js 기준(B1: 같은 청크 경로의 three.js, B2: SkyLens 식 증분 PLY·워커 해석, [결정 0048](docs/decisions/0048-incremental-baselines.md))과의 비교를 측정 중입니다 — 아래 배율은 증분 없는 기준 대비입니다.**
 > 그리는 GPU: three.js 기준 방식과 PointBlitz native·브라우저는 사용자 GPU 가 그리고, 서버 영상만 서버 GPU 가 그립니다. 재생 서버는 CPU 로 청크만 만듭니다(이번 측정은 모두 한 PC).
 
 - 새 데이터가 화면에 나오기까지: three.js 471 ms(preview) / 632 ms(refined) / 904 ms(cold) → PointBlitz 21–36 / 118–131 / 131–186 ms(**three.js 기준 방식 대비 약 5–23 배 빠름**). 받는 데이터도 530.8 MB → 180.4 MB(브라우저·native), 10.3 MB(서버 영상).
