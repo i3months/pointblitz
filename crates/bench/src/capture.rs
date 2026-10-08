@@ -5,7 +5,7 @@
 //! - `compare <dir A> <dir B> [--viewpoints <json>] [--md <file>]`
 
 use crate::image::{Rgba, coverage, read_png, write_png};
-use crate::ssim::ssim_rgba;
+use crate::ssim::{ssim_rgba, ssim_rgba_masked};
 use pointblitz_core::{Camera, Headless, Scene};
 use pointblitz_io::chunk::ply_to_chunks;
 use std::fmt::Write as _;
@@ -116,9 +116,9 @@ pub fn run_compare(args: &[String]) -> Result<(), String> {
         }
     };
     let mut md = String::from(
-        "| 시점 | SSIM | 밝은 픽셀 A | 밝은 픽셀 B | 격자 A | 격자 B | 픽셀이 다른 비율 |\n|---|---:|---:|---:|---:|---:|---:|\n",
+        "| 시점 | SSIM | SSIM(점 영역) | 점 영역 | 밝은 픽셀 A | 밝은 픽셀 B | 격자 A | 격자 B | 픽셀이 다른 비율 |\n|---|---:|---:|---:|---:|---:|---:|---:|---:|\n",
     );
-    let mut sum = 0.0;
+    let (mut sum, mut msum) = (0.0, 0.0);
     for n in &names {
         let ia = read_png(&format!("{a}/{n}.png"))?;
         let ib = read_png(&format!("{b}/{n}.png"))?;
@@ -127,6 +127,10 @@ pub fn run_compare(args: &[String]) -> Result<(), String> {
         }
         let s = ssim_rgba(&ia.data, &ib.data, ia.width, ia.height);
         sum += s;
+        // Point area only (P3.4): the black background otherwise lifts SSIM toward 1.
+        let (ms, share) =
+            ssim_rgba_masked(&ia.data, &ib.data, ia.width, ia.height).unwrap_or((f64::NAN, 0.0));
+        msum += ms;
         let diff = ia
             .data
             .as_chunks::<4>()
@@ -140,7 +144,8 @@ pub fn run_compare(args: &[String]) -> Result<(), String> {
         let (lb, gb) = coverage(&ib);
         writeln!(
             md,
-            "| {n} | {s:.4} | {:.2} % | {:.2} % | {:.2} % | {:.2} % | {:.2} % |",
+            "| {n} | {s:.4} | {ms:.4} | {:.1} % | {:.2} % | {:.2} % | {:.2} % | {:.2} % | {:.2} % |",
+            share * 100.0,
             la * 100.0,
             lb * 100.0,
             ga * 100.0,
@@ -149,7 +154,13 @@ pub fn run_compare(args: &[String]) -> Result<(), String> {
         )
         .unwrap();
     }
-    writeln!(md, "| 평균 | {:.4} | | | | | |", sum / names.len() as f64).unwrap();
+    writeln!(
+        md,
+        "| 평균 | {:.4} | {:.4} | | | | | | |",
+        sum / names.len() as f64,
+        msum / names.len() as f64
+    )
+    .unwrap();
     print!("{md}");
     if let Some(path) = arg(args, "--md") {
         std::fs::write(path, &md).map_err(|e| format!("{path}: {e}"))?;
