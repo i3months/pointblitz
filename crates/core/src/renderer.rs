@@ -36,6 +36,9 @@ pub struct Renderer {
     chunk_stride: u64,
     /// Point diameter in pixels (decision 0007: 2 px).
     pub point_px: f32,
+    /// GPU timestamps for the next `render` calls' pass (decision 0049): begin at `index`, end at
+    /// `index + 1`. Needs `Features::TIMESTAMP_QUERY`.
+    timestamps: Option<(wgpu::QuerySet, u32)>,
 }
 
 impl Renderer {
@@ -136,6 +139,7 @@ impl Renderer {
             chunk_capacity: 64,
             chunk_stride,
             point_px: 2.0,
+            timestamps: None,
         }
     }
 
@@ -164,6 +168,12 @@ impl Renderer {
             }],
         });
         (buf, bg)
+    }
+
+    /// Makes the next `render` calls write the pass's GPU start and end time into `set` at `index` and
+    /// `index + 1` (decision 0049); `None` stops it. The caller resolves the set.
+    pub fn set_timestamp_writes(&mut self, writes: Option<(wgpu::QuerySet, u32)>) {
+        self.timestamps = writes;
     }
 
     /// Records one frame: clears colour to black and depth to 0, then draws every visible chunk.
@@ -229,6 +239,13 @@ impl Renderer {
                     store: wgpu::StoreOp::Discard,
                 }),
                 stencil_ops: None,
+            }),
+            timestamp_writes: self.timestamps.as_ref().map(|(set, index)| {
+                wgpu::RenderPassTimestampWrites {
+                    query_set: set,
+                    beginning_of_pass_write_index: Some(*index),
+                    end_of_pass_write_index: Some(*index + 1),
+                }
             }),
             ..Default::default()
         });

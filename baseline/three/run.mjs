@@ -76,6 +76,7 @@ const raw = await page.evaluate(() => ({
   cycleDraws: window.__pb.cycleDraws,
   phaseReports: window.__pb.phaseReports,
   pacing: window.__pb.pacing,
+  gpuTimer: window.__pb.gpuTimer,
 }));
 const renderer = await page.evaluate(() => {
   if (window.__pb.cycles) return 'server video (NVENC H.264) → WebCodecs → canvas 2D';
