@@ -3,7 +3,8 @@
 # session (PR #10 review — sessions drift, so both implementations must share one).
 #
 # usage: bash bench/suite.sh <ply dir> <out dir>        (run from the repository root)
-# env:   COLD=5 ORBIT=5 X60=3 X1=0 PORT=8783 IMPLS="three native web webs webgl video" B1_UPLOAD=a
+# env:   COLD=5 ORBIT=5 X60=3 X1=0 PORT=8783 IMPLS="three native web webs webgl video" B1_UPLOAD=a ORBIT_BATCHES="1"
+#        ORBIT_BATCHES="30 1" = each orbit run once per batch size (decision 0049), batch 30 named <impl>-orbitb30-<i>
 #        three-b1 / three-b1-webgpu / three-b2 = incremental three.js baselines (decision 0048),
 #        three-b1a / three-b1b = B1 with upload (a) / (b), for the upload smoke
 #        web = PointBlitz in Chrome on WebGPU, webs = same with the WebGPU-only module (decision 0033),
@@ -27,6 +28,7 @@ X60=${X60:-3}
 X1=${X1:-0}
 PORT=${PORT:-8783}
 IMPLS=${IMPLS:-three native web webs webgl video}
+ORBIT_BATCHES=${ORBIT_BATCHES:-1}
 VIDEO_PORT=$((PORT + 100))
 
 cargo build --release -q -p pointblitz-bench -p pointblitz-native -p pointblitz-server
@@ -47,9 +49,9 @@ trap stop_server EXIT
 sleep 3 # the server reads every snapshot once at startup (decision 0026)
 
 URL="http://127.0.0.1:$PORT"
-run() { # impl scenario speed index
-  local impl=$1 scen=$2 speed=$3 i=$4 name cmd
-  name="$impl-$scen$( [ "$scen" = replay ] && echo "$speed" || true )-$i"
+run() { # impl scenario speed index [batch]
+  local impl=$1 scen=$2 speed=$3 i=$4 batch=${5:-1} name cmd
+  name="$impl-$scen$( [ "$scen" = replay ] && echo "$speed" || true )$( [ "$batch" -gt 1 ] && echo "b$batch" || true )-$i"
   echo "$(date +%H:%M:%S) $name"
   case $impl in
     three) cmd=(node baseline/three/run.mjs --server "$URL" --scenario "$scen" --speed "$speed" --metrics "$ABS_OUT/$name.jsonl") ;;
@@ -65,6 +67,14 @@ run() { # impl scenario speed index
     native) cmd=(node bench/native/run.mjs --server "$URL" --scenario "$scen" --speed "$speed" --exe "target/release/pointblitz-native$EXT" --metrics "$ABS_OUT/$name.jsonl") ;;
     video) cmd=(node bench/video/run.mjs --server "$URL" --port "$VIDEO_PORT" --scenario "$scen" --speed "$speed" --exe "target/release/pb-suite-serve$EXT" --metrics "$ABS_OUT/$name.jsonl" --log "$ABS_OUT/$name.server.log") ;;
   esac
+  # orbit with batch > 1 (decision 0049): N frames per sync; browser pages take it as a page parameter.
+  if [ "$batch" -gt 1 ]; then
+    local k q=-1
+    for k in "${!cmd[@]}"; do [ "${cmd[$k]}" = --query ] && q=$((k + 1)); done
+    if [ "$impl" = native ]; then cmd+=(--batch "$batch")
+    elif [ "$q" -ge 0 ]; then cmd[$q]="${cmd[$q]}&batch=$batch"
+    else cmd+=(--query "batch=$batch"); fi
+  fi
   # GPU and CPU state and display clock for every run; one redo of a failed or invalid run.
   local try r
   for try in 1 2; do
@@ -86,7 +96,7 @@ run() { # impl scenario speed index
   return 0
 }
 for i in $(seq 1 "$COLD"); do for impl in $IMPLS; do run "$impl" cold 60 "$i"; done; done
-for i in $(seq 1 "$ORBIT"); do for impl in $IMPLS; do run "$impl" orbit 60 "$i"; done; done
+for i in $(seq 1 "$ORBIT"); do for impl in $IMPLS; do for b in $ORBIT_BATCHES; do run "$impl" orbit 60 "$i" "$b"; done; done; done
 for i in $(seq 1 "$X60"); do for impl in $IMPLS; do run "$impl" replay 60 "$i"; done; done
 for i in $(seq 1 "$X1"); do for impl in $IMPLS; do run "$impl" replay 1 "$i"; done; done
 node bench/contamination.mjs "$ABS_OUT" --apply
