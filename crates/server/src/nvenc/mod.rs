@@ -87,29 +87,50 @@ impl Encoder {
             if r != 0 {
                 return Err(format!("cuCtxCreate: {r}"));
             }
-
-            let nvenc =
-                Library::new("nvEncodeAPI64.dll").map_err(|e| format!("nvEncodeAPI64.dll: {e}"))?;
+            let nvenc = match Library::new("nvEncodeAPI64.dll") {
+                Ok(l) => l,
+                Err(e) => {
+                    if let Ok(destroy) =
+                        cuda.get::<unsafe extern "C" fn(*mut c_void) -> i32>(b"cuCtxDestroy_v2\0")
+                    {
+                        let _ = destroy(cuda_ctx);
+                    }
+                    return Err(format!("nvEncodeAPI64.dll: {e}"));
+                }
+            };
+            // From here on `enc` owns everything created so far: an early return drops it and
+            // Drop releases only the handles that exist (PR #24 review).
+            let mut enc = Self {
+                api: NV_ENCODE_API_FUNCTION_LIST {
+                    version: NV_ENCODE_API_FUNCTION_LIST_VER,
+                    ..Default::default()
+                },
+                encoder: std::ptr::null_mut(),
+                input: std::ptr::null_mut(),
+                output: std::ptr::null_mut(),
+                config,
+                frame: 0,
+                _nvenc: nvenc,
+                _cuda: cuda,
+                cuda_ctx,
+            };
             let create: libloading::Symbol<
                 unsafe extern "C" fn(*mut NV_ENCODE_API_FUNCTION_LIST) -> NVENCSTATUS,
-            > = nvenc
+            > = enc
+                ._nvenc
                 .get(b"NvEncodeAPICreateInstance\0")
                 .map_err(|e| e.to_string())?;
-            let mut api = NV_ENCODE_API_FUNCTION_LIST {
-                version: NV_ENCODE_API_FUNCTION_LIST_VER,
-                ..Default::default()
-            };
-            check(create(&mut api), "NvEncodeAPICreateInstance")?;
+            check(create(&mut enc.api), "NvEncodeAPICreateInstance")?;
+            let api = enc.api;
 
             let mut open = NV_ENC_OPEN_ENCODE_SESSION_EX_PARAMS {
                 version: NV_ENC_OPEN_ENCODE_SESSION_EX_PARAMS_VER,
                 deviceType: NV_ENC_DEVICE_TYPE::NV_ENC_DEVICE_TYPE_CUDA,
-                device: cuda_ctx,
+                device: enc.cuda_ctx,
                 apiVersion: NVENCAPI_VERSION,
                 ..Default::default()
             };
-            let mut encoder = std::ptr::null_mut();
-            call!(api, nvEncOpenEncodeSessionEx, &mut open, &mut encoder)?;
+            call!(api, nvEncOpenEncodeSessionEx, &mut open, &mut enc.encoder)?;
 
             // P1 (fastest) with the ultra-low-latency tuning: no B frames, no lookahead.
             let preset = NV_ENC_PRESET_P1_GUID;
@@ -125,7 +146,7 @@ impl Encoder {
             call!(
                 api,
                 nvEncGetEncodePresetConfigEx,
-                encoder,
+                enc.encoder,
                 NV_ENC_CODEC_H264_GUID,
                 preset,
                 tuning,
@@ -160,7 +181,7 @@ impl Encoder {
                 tuningInfo: tuning,
                 ..Default::default()
             };
-            call!(api, nvEncInitializeEncoder, encoder, &mut init)?;
+            call!(api, nvEncInitializeEncoder, enc.encoder, &mut init)?;
 
             let mut input = NV_ENC_CREATE_INPUT_BUFFER {
                 version: NV_ENC_CREATE_INPUT_BUFFER_VER,
@@ -169,24 +190,15 @@ impl Encoder {
                 bufferFmt: NV_ENC_BUFFER_FORMAT::NV_ENC_BUFFER_FORMAT_ABGR,
                 ..Default::default()
             };
-            call!(api, nvEncCreateInputBuffer, encoder, &mut input)?;
+            call!(api, nvEncCreateInputBuffer, enc.encoder, &mut input)?;
+            enc.input = input.inputBuffer;
             let mut output = NV_ENC_CREATE_BITSTREAM_BUFFER {
                 version: NV_ENC_CREATE_BITSTREAM_BUFFER_VER,
                 ..Default::default()
             };
-            call!(api, nvEncCreateBitstreamBuffer, encoder, &mut output)?;
-
-            Ok(Self {
-                api,
-                encoder,
-                input: input.inputBuffer,
-                output: output.bitstreamBuffer,
-                config,
-                frame: 0,
-                _nvenc: nvenc,
-                _cuda: cuda,
-                cuda_ctx,
-            })
+            call!(api, nvEncCreateBitstreamBuffer, enc.encoder, &mut output)?;
+            enc.output = output.bitstreamBuffer;
+            Ok(enc)
         }
     }
 
@@ -210,6 +222,17 @@ impl Encoder {
             };
             call!(self.api, nvEncLockInputBuffer, self.encoder, &mut lock)?;
             let pitch = lock.pitch as usize;
+            if pitch < w * 4 {
+                // A shorter row than the frame would overrun the buffer (PR #24 review).
+                let _ = self
+                    .api
+                    .nvEncUnlockInputBuffer
+                    .map(|f| f(self.encoder, self.input));
+                return Err(format!(
+                    "NVENC input pitch {pitch} < {} bytes per row",
+                    w * 4
+                ));
+            }
             let dst = lock.bufferDataPtr.cast::<u8>();
             for y in 0..h {
                 std::ptr::copy_nonoverlapping(
@@ -271,14 +294,21 @@ impl Encoder {
 impl Drop for Encoder {
     fn drop(&mut self) {
         unsafe {
-            if let Some(f) = self.api.nvEncDestroyInputBuffer {
-                let _ = f(self.encoder, self.input);
-            }
-            if let Some(f) = self.api.nvEncDestroyBitstreamBuffer {
-                let _ = f(self.encoder, self.output);
-            }
-            if let Some(f) = self.api.nvEncDestroyEncoder {
-                let _ = f(self.encoder);
+            // Only what exists: `new` may have stopped partway (PR #24 review).
+            if !self.encoder.is_null() {
+                if !self.input.is_null()
+                    && let Some(f) = self.api.nvEncDestroyInputBuffer
+                {
+                    let _ = f(self.encoder, self.input);
+                }
+                if !self.output.is_null()
+                    && let Some(f) = self.api.nvEncDestroyBitstreamBuffer
+                {
+                    let _ = f(self.encoder, self.output);
+                }
+                if let Some(f) = self.api.nvEncDestroyEncoder {
+                    let _ = f(self.encoder);
+                }
             }
             if let Ok(destroy) = self
                 ._cuda

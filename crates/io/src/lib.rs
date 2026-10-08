@@ -7,8 +7,11 @@
 //! - [`ply`]: whole-file reading.
 //! - [`stream`]: incremental reading as bytes arrive.
 //! - [`chunk`]: the 16 B/point chunk format clients copy straight to the GPU (decisions 0008, 0022).
+//! - `client` (not wasm): the replay-server client used by the native viewer and the video server.
 
 pub mod chunk;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod client;
 pub mod ply;
 pub mod stream;
 
