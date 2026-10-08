@@ -57,7 +57,8 @@ await page.goto(`${server}/static/${pagePath}?scenario=${scenario}&speed=${speed
 const after = await chromeProcessIds(browser);
 const missed = after.renderer.filter((pid) => !procs.renderer.includes(pid));
 if (missed.length) console.error(`warning: renderer process changed on navigation (${missed}); mem_cpu misses it`);
-await page.waitForFunction(() => window.__pb?.done, null, { timeout: 3_600_000, polling: 500 });
+// --timeout <s>: give up on a page that never finishes (e.g. a failed load) instead of waiting an hour.
+await page.waitForFunction(() => window.__pb?.done, null, { timeout: Number(args.timeout ?? 3600) * 1000, polling: 500 });
 clearInterval(sampler);
 const procSamples = stopProc();
 
@@ -73,6 +74,7 @@ const raw = await page.evaluate(() => ({
   stages: window.__pb.stages,
   frameTimes: window.__pb.frameTimes,
   cycleDraws: window.__pb.cycleDraws,
+  pacing: window.__pb.pacing,
 }));
 const renderer = await page.evaluate(() => {
   if (window.__pb.cycles) return 'server video (NVENC H.264) → WebCodecs → canvas 2D';
