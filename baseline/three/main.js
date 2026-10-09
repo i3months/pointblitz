@@ -102,7 +102,8 @@ function webgpuMaterial() {
   const { attribute, uv, vec4, float, step, length } = TSL;
   const m = new THREE.PointsNodeMaterial({ sizeAttenuation: false });
   m.size = POINT_SIZE_PX;
-  m.positionNode = attribute('instancePosition', 'vec3');
+  // Normalized u16 position (decision 0051), four components because WebGPU has no unorm16x3.
+  m.positionNode = attribute('instancePosition', 'vec4').xyz;
   m.colorNode = vec4(attribute('instanceColor', 'vec4').rgb, float(1));
   m.opacityNode = step(length(uv().sub(0.5)), float(0.5)); // 1 inside the disk, 0 outside
   m.alphaTest = 0.5;
@@ -204,46 +205,59 @@ function disposeGroup(g) {
   for (const o of g.children) o.geometry.dispose();
 }
 
-// B1 piece from one PointBlitz chunk (decision 0022: 80 B header, then 16 B/point: f32×3 + u8×4).
+// B1 piece from one PointBlitz chunk (decisions 0022, 0051: 80 B header, then 12 B/point: position
+// u16×3 quantised to the chunk's box, a zero u16, colour u8×4). three.js reads the u16 as normalized
+// 0 … 1 and the object's position / scale (box minimum / box size) undo the quantisation — no CPU
+// parsing, as on the GPU of PointBlitz.
 function chunkPiece(chunk) {
   const v = new DataView(chunk.buffer, chunk.byteOffset, 80);
   const n = v.getUint32(16, true);
   const origin = [v.getFloat64(24, true), v.getFloat64(32, true), v.getFloat64(40, true)];
   const f = (o) => [v.getFloat32(o, true), v.getFloat32(o + 4, true), v.getFloat32(o + 8, true)];
-  const sphere = sphereFromBox(f(48), f(60));
+  const min = f(48);
+  const max = f(60);
+  const stride = v.getUint16(72, true);
+  if (stride !== 12) throw new Error(`B1 reads stride 12 chunks, got ${stride}`);
+  // In the object's own (normalized) space the box is the unit cube.
+  const sphere = new THREE.Sphere(new THREE.Vector3(0.5, 0.5, 0.5), Math.sqrt(3) / 2);
   const Attr = webgpu ? THREE.InstancedBufferAttribute : THREE.BufferAttribute;
+  // WebGPU has no unorm16x3 vertex format: read four components there and use xyz.
+  const posItems = webgpu ? 4 : 3;
   let position, color;
   if (upload === 'a') {
     // (a) the chunk bytes as they are: one interleaved view per type (three.js takes one typed
-    // array per InterleavedBuffer), so the same bytes go to the GPU twice — 32 B/point.
+    // array per InterleavedBuffer), so the same bytes go to the GPU twice — 24 B/point.
     const IB = webgpu ? THREE.InstancedInterleavedBuffer : THREE.InterleavedBuffer;
-    position = new THREE.InterleavedBufferAttribute(new IB(new Float32Array(chunk.buffer, chunk.byteOffset + 80, n * 4), 4), 3, 0);
-    color = new THREE.InterleavedBufferAttribute(new IB(new Uint8Array(chunk.buffer, chunk.byteOffset + 80, n * 16), 16), webgpu ? 4 : 3, 12, true);
+    position = new THREE.InterleavedBufferAttribute(new IB(new Uint16Array(chunk.buffer, chunk.byteOffset + 80, n * 6), 6), posItems, 0, true);
+    color = new THREE.InterleavedBufferAttribute(new IB(new Uint8Array(chunk.buffer, chunk.byteOffset + 80, n * 12), 12), webgpu ? 4 : 3, 8, true);
   } else {
-    // (b) split on the CPU into tightly packed position / colour arrays — 16 B/point on the GPU.
-    const src = new Float32Array(chunk.buffer, chunk.byteOffset + 80, n * 4);
-    const bytes = new Uint8Array(chunk.buffer, chunk.byteOffset + 80, n * 16);
-    const pos = new Float32Array(n * 3);
+    // (b) split on the CPU into tightly packed position / colour arrays — 10 B/point on the GPU
+    // (12 on WebGPU, where the position needs four components).
+    const src = new Uint16Array(chunk.buffer, chunk.byteOffset + 80, n * 6);
+    const bytes = new Uint8Array(chunk.buffer, chunk.byteOffset + 80, n * 12);
+    const pos = new Uint16Array(n * posItems);
     const col = new Uint8Array(n * 4);
     for (let i = 0; i < n; i++) {
-      pos[i * 3] = src[i * 4];
-      pos[i * 3 + 1] = src[i * 4 + 1];
-      pos[i * 3 + 2] = src[i * 4 + 2];
-      col[i * 4] = bytes[i * 16 + 12];
-      col[i * 4 + 1] = bytes[i * 16 + 13];
-      col[i * 4 + 2] = bytes[i * 16 + 14];
+      pos[i * posItems] = src[i * 6];
+      pos[i * posItems + 1] = src[i * 6 + 1];
+      pos[i * posItems + 2] = src[i * 6 + 2];
+      col[i * 4] = bytes[i * 12 + 8];
+      col[i * 4 + 1] = bytes[i * 12 + 9];
+      col[i * 4 + 2] = bytes[i * 12 + 10];
       col[i * 4 + 3] = 255;
     }
-    position = new Attr(pos, 3);
+    position = new Attr(pos, posItems, true);
     color = new Attr(col, 4, true);
   }
   const obj = piece(position, color, n, sphere);
-  obj.position.set(...origin);
+  obj.position.set(origin[0] + min[0], origin[1] + min[1], origin[2] + min[2]);
+  // A flat box side would make a singular matrix; any tiny scale keeps those points in place.
+  obj.scale.set(...[0, 1, 2].map((k) => Math.max(max[k] - min[k], 1e-6)));
   obj.updateMatrixWorld();
   return { obj, n };
 }
 
-const BYTES_PER_POINT = { b1a: 32, b1b: 16, b2: 16 };
+const BYTES_PER_POINT = { b1a: 24, b1b: webgpu ? 12 : 10, b2: 16 };
 
 async function loadSnapshotB1(ev) {
   const q = have ? `?have=${have[0]}.${have[1]}` : '';
@@ -253,7 +267,8 @@ async function loadSnapshotB1(ev) {
   const delivery = res.headers.get('X-PB-Delivery');
   const generation = Number(res.headers.get('X-PB-Generation'));
   // A delta appends to the shown generation. A full delivery builds a new one: the very first is
-  // shown progressively, a later one is swapped in when its last chunk arrived (as PointBlitz).
+  // shown progressively, a later one is swapped in once its coarse first pass is in (decision 0051,
+  // as PointBlitz) and filled in as the rest arrives.
   const into = delivery === 'delta' ? shown : new THREE.Group();
   const progressive = delivery !== 'delta' && !shown;
   if (progressive) {
@@ -263,10 +278,19 @@ async function loadSnapshotB1(ev) {
   let bytes = 0;
   let added = 0;
   let lastSeen = false;
-  const splitter = new ChunkSplitter((chunk, last) => {
+  const splitter = new ChunkSplitter((chunk, last, firstPass) => {
     const { obj, n } = chunkPiece(chunk);
     into.add(obj);
     added += n;
+    if (firstPass && into !== shown) {
+      disposeGroup(shown);
+      shown = into;
+      scene.add(into);
+    }
+    if (firstPass && !last) {
+      mark('first_pass_uploaded', { seq: ev.seq });
+      pendingFirst.push(ev.seq);
+    }
     if (into === shown) dirty = true;
     if (last) lastSeen = true;
   });
@@ -281,7 +305,8 @@ async function loadSnapshotB1(ev) {
   mark('fetch_end', { seq: ev.seq, bytes, delivery, generation });
   shownPoints = delivery === 'delta' ? shownPoints + added : added;
   mark('parse_end', { seq: ev.seq, points: shownPoints, bytesPerPoint: BYTES_PER_POINT[`b1${upload}`] });
-  if (delivery !== 'delta' && !progressive) {
+  if (into !== shown) {
+    // A full delivery without a first-pass flag: swap at its end.
     disposeGroup(shown);
     shown = into;
     scene.add(into);
@@ -352,15 +377,24 @@ function gpuDone() {
 }
 
 const pendingPresent = [];
+const pendingFirst = []; // B1: snapshots whose coarse first pass is in the scene (decision 0051)
 let stopLoop = false;
 async function frame(t) {
   if (stopLoop) return;
   pb.frames.push(t);
   // B0 draws every frame (decision 0005); B1/B2 only when something changed.
-  if (mode === 'full' || dirty || pendingPresent.length) {
+  if (mode === 'full' || dirty || pendingPresent.length || pendingFirst.length) {
     dirty = false;
     renderer.render(scene, camera);
+    if (pendingFirst.length && !pendingPresent.length) {
+      // First reflection: the first frame showing the new generation, synchronised the same way.
+      const seqs = pendingFirst.splice(0);
+      const wait = gpuDone();
+      if (wait) await wait;
+      for (const seq of seqs) mark('first_presented', { seq });
+    }
     if (pendingPresent.length) {
+      const firsts = pendingFirst.splice(0);
       // The first frame that contains a new snapshot is synchronised once (decision 0020): 'submitted'
       // is when render() returned, 'presented' is when the GPU finished drawing it. One sync per
       // snapshot (14 per flight) — a measurement artefact, applied identically to every implementation.
@@ -368,6 +402,7 @@ async function frame(t) {
       for (const seq of seqs) mark('submitted', { seq });
       const wait = gpuDone();
       if (wait) await wait;
+      for (const seq of firsts) mark('first_presented', { seq });
       for (const seq of seqs) mark('presented', { seq, points: shownPoints || undefined });
     }
   }

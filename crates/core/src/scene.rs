@@ -7,7 +7,9 @@
 //! - Before anything is on screen, the first generation is shown as it arrives.
 
 use glam::DVec3;
-use pointblitz_io::chunk::{self, ChunkError, ChunkHeader, FLAG_LAST_IN_GENERATION};
+use pointblitz_io::chunk::{
+    self, ChunkError, ChunkHeader, FLAG_FIRST_PASS_COMPLETE, FLAG_LAST_IN_GENERATION,
+};
 use wgpu::util::DeviceExt;
 
 pub struct GpuChunk {
@@ -70,7 +72,9 @@ impl Scene {
     pub fn insert(&mut self, device: &wgpu::Device, bytes: &[u8]) -> Result<Inserted, ChunkError> {
         let header = chunk::decode_header(bytes)?;
         let generation = header.generation;
-        let last = header.flags & FLAG_LAST_IN_GENERATION != 0;
+        // A new generation is shown once its coarse first pass is in (decision 0051) or, for a
+        // delivery without one, at its last chunk; the rest is filled in as it arrives.
+        let last = header.flags & (FLAG_LAST_IN_GENERATION | FLAG_FIRST_PASS_COMPLETE) != 0;
 
         if self.current.is_some_and(|cur| generation < cur) {
             return Ok(Inserted::Stale);
@@ -112,7 +116,7 @@ impl Scene {
 fn upload(device: &wgpu::Device, bytes: &[u8], header: ChunkHeader) -> GpuChunk {
     let body = chunk::vertex_bytes(bytes);
     // Zero-point chunks still need a non-empty buffer to be valid.
-    let contents: &[u8] = if body.is_empty() { &[0u8; 16] } else { body };
+    let contents: &[u8] = if body.is_empty() { &[0u8; 12] } else { body };
     let buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
         label: Some("chunk"),
         contents,

@@ -302,8 +302,9 @@ struct App {
     drag: Option<(f64, f64)>,
     cursor: (f64, f64),
     marks: Marks,
-    /// Snapshots whose last chunk is in the scene but not yet presented.
-    to_present: Vec<u32>,
+    /// Snapshots in the scene but not yet presented: (seq, all points) — false for a coarse first
+    /// pass (decision 0051).
+    to_present: Vec<(u32, bool)>,
     snaps: BTreeMap<u32, SnapTimes>,
     first_chunk_seen: Vec<u32>,
     /// Time spent in Scene::insert (validation + GPU buffer creation) per snapshot.
@@ -340,6 +341,9 @@ impl App {
                         .add("first_chunk", now, &format!(",\"seq\":{seq}"));
                 }
                 let Some(gpu) = &self.gpu else { return };
+                // The chunk that completes a coarse first pass shows the new generation (0051).
+                let first_pass = pointblitz_io::chunk::decode_header(&bytes)
+                    .is_ok_and(|h| h.flags & pointblitz_io::chunk::FLAG_FIRST_PASS_COMPLETE != 0);
                 let t_insert = Instant::now();
                 let inserted = self.scene.insert(&gpu.device, &bytes);
                 *self.upload_ms.entry(seq).or_default() += t_insert.elapsed().as_secs_f64() * 1e3;
@@ -372,7 +376,14 @@ impl App {
                             self.upload_ms.get(&seq).copied().unwrap_or(0.0)
                         ),
                     );
-                    self.to_present.push(seq);
+                    self.to_present.push((seq, true));
+                } else if first_pass {
+                    self.marks.add(
+                        "first_pass_uploaded",
+                        Instant::now(),
+                        &format!(",\"seq\":{seq}"),
+                    );
+                    self.to_present.push((seq, false));
                 }
             }
             Msg::Delivered {
@@ -453,7 +464,13 @@ impl App {
                 timeout: None,
             });
             let presented = Instant::now();
-            for seq in self.to_present.drain(..) {
+            for (seq, all) in self.to_present.drain(..) {
+                if !all {
+                    // First reflection of a coarse-first delivery (decision 0051).
+                    self.marks
+                        .add("first_presented", presented, &format!(",\"seq\":{seq}"));
+                    continue;
+                }
                 self.marks
                     .add("submitted", submitted, &format!(",\"seq\":{seq}"));
                 self.marks

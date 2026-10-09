@@ -3,11 +3,12 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { ChunkSplitter } from './chunks.js';
 
-function chunk(points, last, fill) {
-  const c = new Uint8Array(80 + 16 * points).fill(fill);
+function chunk(points, last, fill, { stride = 12, firstPass = false } = {}) {
+  const c = new Uint8Array(80 + stride * points).fill(fill);
   const v = new DataView(c.buffer);
   v.setUint32(16, points, true);
-  v.setUint32(20, last ? 1 : 0, true);
+  v.setUint32(20, (last ? 1 : 0) | (firstPass ? 2 : 0), true);
+  v.setUint16(72, stride, true);
   return c;
 }
 
@@ -35,4 +36,19 @@ test('one byte at a time', () => {
   for (const byte of a) s.push(new Uint8Array([byte]));
   assert.equal(got.length, 1);
   assert.deepEqual([...got[0]], [...a]);
+});
+
+test('reads the stride and the first-pass flag (decision 0051)', () => {
+  const a = chunk(4, false, 1, { stride: 8, firstPass: true });
+  const b = chunk(2, true, 2, { stride: 12 });
+  const got = [];
+  const s = new ChunkSplitter((bytes, last, firstPass) => got.push([bytes.length, last, firstPass]));
+  s.push(new Uint8Array([...a, ...b]));
+  assert.deepEqual(got, [[80 + 8 * 4, false, true], [80 + 12 * 2, true, false]]);
+});
+
+test('rejects an unknown stride', () => {
+  const c = chunk(1, true, 0, { stride: 16 });
+  const s = new ChunkSplitter(() => {});
+  assert.throws(() => s.push(c), /stride 16/);
 });

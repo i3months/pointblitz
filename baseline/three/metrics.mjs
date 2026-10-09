@@ -49,6 +49,24 @@ export function summarize(raw, { device, commit, target = 'three.js' }) {
     }
     out.push(rec('event_latency', presented.t - r.t, 'ms', 1, { seq: r.seq, kind: r.kind, bytes: f?.bytes, points: p?.points }));
   }
+  // First reflection (decision 0051, SPEC §6.2 event_first_latency): event → the first frame that
+  // shows the event's new generation — a coarse-first delivery's first pass; without one (deltas,
+  // the baselines) the same frame as event_latency.
+  const firstLatency = { preview: [], refined: [] };
+  const firstScreen = { preview: [], refined: [] };
+  for (const r of by('snapshot_received')) {
+    const shown = by('first_presented').find((m) => m.seq === r.seq) ?? by('presented').find((m) => m.seq === r.seq);
+    if (!shown) continue;
+    firstLatency[r.kind ?? 'refined'].push(shown.t - r.t);
+    if (shown.screen != null) firstScreen[r.kind ?? 'refined'].push(shown.screen - r.t);
+    out.push(rec('event_first_latency', shown.t - r.t, 'ms', 1, { seq: r.seq, kind: r.kind, coarse: shown.name === 'first_presented' }));
+  }
+  for (const kind of ['preview', 'refined']) {
+    const f = firstLatency[kind].sort((a, b) => a - b);
+    if (f.length) out.push(rec(`event_first_latency_${kind}_p50`, percentile(f, 0.5), 'ms', f.length));
+    const fs = firstScreen[kind].sort((a, b) => a - b);
+    if (fs.length) out.push(rec(`event_first_screen_latency_${kind}_p50`, percentile(fs, 0.5), 'ms', fs.length));
+  }
   for (const kind of ['preview', 'refined']) {
     const s = latency[kind].sort((a, b) => a - b);
     if (s.length) {
