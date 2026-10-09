@@ -73,6 +73,6 @@ WebRTC 비교(결정 0010 "P3 이후")는 P3.4 결과를 보고 따로 쪼갠다
 | P4.14 | P4.12·P4.13 측정(0049 규칙, 변경 전 = 0050 뒤 main): web·webgl·native·video × replay ×60 10 + cold 10, 첫 반영·완전 반영, 받기 바닥 | 결과 문서, 목표 판정(web·video 정밀 첫 반영 ≤ 50 ms) | [x] 2026-10-09 `8c8e80a`(#81) — 목표 통과(web 37.2·video 38.5 ms), video 미리보기·cold 완전 느려짐 → P4.15 |
 | P4.15 | P4.14 에서 느려진 video 미리보기·cold 완전 고치기: 8 MB 넘는 전달만 병렬 읽기, 나머지 패스 모으기를 첫 패스 인코딩과 겹치기(결과 바이트 동일). 측정 계획 6(video·web, cold 10·replay 10) | video 미리보기·cold 완전 회복, web·video 정밀 첫 반영 ≤ 50 ms 유지 | [x] 2026-10-09 `3784091`(#83) — video 미리보기 회복(1.45 배), video cold 완전 회복 안 됨(1.07, 차이 없음) → P4.16 |
 | P4.16 | 패스별 청크: 전체 전달의 각 패스를 원래 레코드에서 8 칸 간격으로 복사 없이 인코딩(청크 경계는 패스 단위), video cold 완전 회복 시도. 측정 계획 7 | video cold 완전 빨라짐, web·video 정밀 첫 반영 ≤ 50 ms 유지 | [x] 2026-10-09 `4806b9b`(#85) — video 정밀 완전 1.33 배 빨라짐, cold 완전 차이 없음, video 정밀 첫 반영 느려짐(0.85, 48.8 ms, 목표 안) → P4.17 |
-| P4.18 | 최종 비교(소유자 보고서용): 0.2.0(664eaa1) 한 빌드, as-is(B2) · 같은 데이터 three.js(B1a·B1b·B1-webgpu) · to-be(web·webgl·native·video --data), replay 10 · cold 10 · orbit batch 30 5, 측정 계획 9 | 판정표(as-is ÷ to-be, 같은 API), 목표 확인, 그림 | 결과 PR |
+| P4.18 | 최종 비교(소유자 보고서용): 0.2.0(664eaa1) 한 빌드, as-is(B2) · 같은 데이터 three.js(B1a·B1b·B1-webgpu) · to-be(web·webgl·native·video --data), replay 10 · cold 10 · orbit batch 30 5, 측정 계획 9 | 판정표(as-is ÷ to-be, 같은 API), 목표 확인, 그림 | [x] 2026-10-09 `0d4ceb6`(#91) — as-is 대비 정밀 첫 반영 web 3.38·webgl 2.56·native 4.89·video 2.99 배, 목표 통과 |
 
 P5 이후는 P4 가 끝나면 쪼갠다.
