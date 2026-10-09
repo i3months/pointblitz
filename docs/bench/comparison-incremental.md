@@ -173,3 +173,17 @@ B1\* = 지표마다 B1a·B1b 중 좋은 쪽(괄호에 표시, 가장 강한 thre
 | PointBlitz webgl | 인스턴스 사각형 | WebGL2 | 5.00 · 5.00 · 5.00 | 4.86 · 4.86 · 4.87 |
 
 - 결과: WebGL2 에서 같은 인스턴스 사각형을 three.js 가 그리면 2.10 ms 로, 감독이 정한 기준(약 4.8 ms 면 원인 = 사각형, 약 1.5 ms 면 원인 = wgpu GL)의 **사이**다. 숫자 그대로: **사각형 방식의 몫 ≈ 0.5 ms(1.6 → 2.1 ms), PointBlitz WebGL2 경로에만 있는 몫 ≈ 2.8 ms(2.1 → 4.86 ms)**. 그 2.8 ms 가 wgpu GL 백엔드 안의 어디(상태 변경, 청크별 바인드 그룹·동적 오프셋, 버퍼 바인딩 등)에서 오는지는 이번에 가르지 않았다.
+
+## 8. 감독 진단(판정 아님, 2026-10-09) — 같은 API 그리기 차이의 원인
+원 기록은 감독 진단 작업 폴더의 `target/diag/d1–d4`, `w1`(저장소에 넣지 않음). 진단에 쓴 임시 변경(PointBlitz 페이지의 모듈 고르기, three.js 기준의 원판 잘라내기 끄기, 받기 시간 시험 스크립트)은 진단용이라 커밋하지 않았다.
+
+### 8.1 WebGL2: PointBlitz 4.86 대 three.js 인스턴스 사각형 2.07 ms(GPU)
+- 약 **0.9 ms 는 PointBlitz 측정의 매 프레임 1 픽셀 복사**다: 복사를 끄면(`glcopy=0`) 3.79–4.25 ms.
+- 나머지 약 **1.8 ms 는 ANGLE → D3D11 에서만** 생긴다: Chrome 을 `--use-angle=vulkan` 으로 띄우면 PointBlitz 2.18 대 three.js 2.24 ms 로 같다.
+- 프래그먼트의 `discard`·깊이·색 쓰기를 꺼도 그대로이고, 점 수를 절반으로 하면 3.8 → 1.2 ms 로 줄어 점 수에 비례하지 않는다.
+- ANGLE 의 GL 백엔드(`--use-angle=gl`)에서는 GPU timer 를 쓸 수 없어 재지 못했다.
+
+### 8.2 WebGPU: PointBlitz 1.31 대 three.js 2.00 ms(GPU)
+- 데이터 크기는 영향이 없다: three.js 올리기 (b)(16 B/점)로 바꿔도 1.97 ms.
+- three.js 의 원판 잘라내기(`opacityNode` + `alphaTest`)를 끄면 1.75 ms(약 0.25 ms). PointBlitz 의 `discard` 를 꺼도 1.31 ms 그대로.
+- 나머지 약 0.45 ms 는 가르지 못했다.
