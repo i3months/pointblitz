@@ -410,7 +410,10 @@ pub fn run(args: &[String]) -> Result<(), String> {
         while let Ok(m) = msg_rx.try_recv() {
             match m {
                 Msg::Chunk {
-                    seq, bytes, last, ..
+                    seq,
+                    bytes,
+                    last,
+                    at,
                 } => {
                     let first_pass = pointblitz_io::chunk::decode_header(&bytes).is_ok_and(|h| {
                         h.flags & pointblitz_io::chunk::FLAG_FIRST_PASS_COMPLETE != 0
@@ -426,18 +429,39 @@ pub fn run(args: &[String]) -> Result<(), String> {
                     } else if first_pass {
                         first_visible.push(seq);
                     }
+                    // Server-side stages (P4.14): when the chunk that shows the snapshot arrived
+                    // and the tick whose frame draws it.
+                    if last || first_pass {
+                        writeln!(
+                            log,
+                            r#"{{"type":"chunk","seq":{seq},"first_pass":{first_pass},"last":{last},"at_ms":{:.3},"tick_ms":{:.3},"frame":{frame}}}"#,
+                            ms_since(at),
+                            ms_since(tick_start)
+                        )
+                        .unwrap();
+                    }
                 }
                 Msg::End => ended_at = Some(Instant::now()),
                 Msg::Error(e) => eprintln!("replay: {e}"),
                 // Forward the announcement at once: a client stamps snapshot_received when this
                 // arrives, so event_latency starts where the event reaches the server (P3.3).
-                Msg::Received { snap, .. } => broadcast(
-                    &clients,
-                    &Out::Text(Arc::new(format!(
-                        r#"{{"type":"snapshot","seq":{},"kind":"{}"}}"#,
-                        snap.seq, snap.kind
-                    ))),
-                ),
+                Msg::Received { snap, at } => {
+                    writeln!(
+                        log,
+                        r#"{{"type":"received","seq":{},"kind":"{}","at_ms":{:.3}}}"#,
+                        snap.seq,
+                        snap.kind,
+                        ms_since(at)
+                    )
+                    .unwrap();
+                    broadcast(
+                        &clients,
+                        &Out::Text(Arc::new(format!(
+                            r#"{{"type":"snapshot","seq":{},"kind":"{}"}}"#,
+                            snap.seq, snap.kind
+                        ))),
+                    );
+                }
                 Msg::Delivered { .. } => {}
             }
         }
