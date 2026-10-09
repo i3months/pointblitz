@@ -19,6 +19,12 @@ use std::time::Instant;
 /// Largest chunk (decision 0022).
 pub const MAX_POINTS: usize = 256 * 1024;
 
+/// Deliveries up to this many bytes are read in one go; larger ones in parallel pieces of at least
+/// [`READ_PIECE`] (P4.15: reading a 0.4–0.9 MB delta in one piece per core took 7.6 ms instead of
+/// 1.6 ms).
+const PARALLEL_READ_ABOVE: usize = 8 << 20;
+const READ_PIECE: usize = 4 << 20;
+
 /// Residues of the point index modulo 8, in the order a full delivery sends them (decision 0051):
 /// bit-reversed, so every prefix of passes samples the scene evenly.
 pub const PASS_ORDER: [usize; 8] = [0, 4, 2, 6, 1, 5, 3, 7];
@@ -213,28 +219,39 @@ impl Conversion {
         let skip = self.skip.min(h.vertex_count);
         let n = h.vertex_count - skip;
         let workers = std::thread::available_parallelism().map_or(4, |n| n.get());
-        // Read the records in parallel pieces (P4.14: one read of 67 MB took about 18 ms).
+        // Read the records: a large delivery in parallel pieces (P4.14: one read of 67 MB took about
+        // 18 ms), a small one in one go (P4.15).
         let mut records = vec![0u8; n * h.stride];
         let base = (h.header_len + skip * h.stride) as u64;
-        let piece = records.len().div_ceil(workers).max(1);
-        std::thread::scope(|scope| -> std::io::Result<()> {
-            let parts: Vec<_> = records
-                .chunks_mut(piece)
-                .enumerate()
-                .map(|(i, part)| {
-                    scope.spawn(move || -> std::io::Result<()> {
-                        let mut f = std::fs::File::open(path)?;
-                        f.seek(SeekFrom::Start(base + (i * piece) as u64))?;
-                        f.read_exact(part)
+        let readers = if records.len() > PARALLEL_READ_ABOVE {
+            (records.len() / READ_PIECE).clamp(1, workers)
+        } else {
+            1
+        };
+        let piece = records.len().div_ceil(readers).max(1);
+        if readers == 1 {
+            file.seek(SeekFrom::Start(base))?;
+            file.read_exact(&mut records)?;
+        } else {
+            std::thread::scope(|scope| -> std::io::Result<()> {
+                let parts: Vec<_> = records
+                    .chunks_mut(piece)
+                    .enumerate()
+                    .map(|(i, part)| {
+                        scope.spawn(move || -> std::io::Result<()> {
+                            let mut f = std::fs::File::open(path)?;
+                            f.seek(SeekFrom::Start(base + (i * piece) as u64))?;
+                            f.read_exact(part)
+                        })
                     })
-                })
-                .collect();
-            for p in parts {
-                p.join()
-                    .map_err(|_| std::io::Error::other("reader panicked"))??;
-            }
-            Ok(())
-        })?;
+                    .collect();
+                for p in parts {
+                    p.join()
+                        .map_err(|_| std::io::Error::other("reader panicked"))??;
+                }
+                Ok(())
+            })?;
+        }
         // A full delivery goes coarse first; a delta (appended points) keeps file order. The first
         // pass (every 8th point) is gathered and encoded before the other passes are even put in
         // order, so its chunks leave as early as possible (P4.14, decision 0051).
@@ -281,15 +298,23 @@ impl Conversion {
             for i in (0..n).step_by(8) {
                 first.extend_from_slice(&records[i * h.stride..(i + 1) * h.stride]);
             }
-            encode(&first, 0, first_chunks);
+            // The other passes are gathered while the first pass is encoded (P4.15).
+            let rest = std::thread::scope(|scope| {
+                let gather = scope.spawn(|| {
+                    let mut rest = Vec::with_capacity((n - k) * h.stride);
+                    for r in &PASS_ORDER[1..] {
+                        for i in (*r..n).step_by(8) {
+                            rest.extend_from_slice(&records[i * h.stride..(i + 1) * h.stride]);
+                        }
+                    }
+                    rest
+                });
+                encode(&first, 0, first_chunks);
+                gather.join()
+            })
+            .map_err(|_| std::io::Error::other("gather panicked"))?;
             drop(first);
             if first_chunks < chunks {
-                let mut rest = Vec::with_capacity((n - k) * h.stride);
-                for r in &PASS_ORDER[1..] {
-                    for i in (*r..n).step_by(8) {
-                        rest.extend_from_slice(&records[i * h.stride..(i + 1) * h.stride]);
-                    }
-                }
                 encode(&rest, first_chunks, chunks);
             }
         } else {
@@ -506,6 +531,47 @@ mod tests {
             d.chunk(2).unwrap(),
             encode_records(&h, &body[36 * h.stride..], 9, 2, FLAG_LAST_IN_GENERATION)
         );
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn large_deliveries_read_in_pieces_give_the_same_chunks() {
+        // 400,000 points × 15 B = 6 MB is below the parallel-read size; × 27 B (with normals, as
+        // skyrecon writes) = 10.8 MB is above it (P4.15).
+        let n = 400_000u32;
+        let mut bytes = format!(
+            "ply\nformat binary_little_endian 1.0\nelement vertex {n}\nproperty float x\n\
+             property float y\nproperty float z\nproperty uchar red\nproperty uchar green\n\
+             property uchar blue\nproperty float nx\nproperty float ny\nproperty float nz\n\
+             end_header\n"
+        )
+        .into_bytes();
+        for i in 0..n {
+            for v in [i as f32 * 0.01, (i % 977) as f32, -((i % 13) as f32)] {
+                bytes.extend_from_slice(&v.to_le_bytes());
+            }
+            bytes.extend_from_slice(&[(i % 251) as u8, (i % 7) as u8, 9]);
+            bytes.extend_from_slice(&[0u8; 12]);
+        }
+        let h = crate::parse_header(&bytes).unwrap();
+        assert!(h.vertex_count * h.stride > PARALLEL_READ_ABOVE);
+        let path = std::env::temp_dir().join(format!("pb-large-{}.ply", std::process::id()));
+        std::fs::write(&path, &bytes).unwrap();
+        let body = &bytes[h.header_len..];
+        let (ordered, k) = coarse_order(body, h.stride);
+        let plan = chunk_plan_with(n as usize, Some(k), 64 * 1024);
+        let c = Conversion::start_with(path.clone(), 0, 3, 64 * 1024);
+        assert_eq!(c.len(), Ok(plan.len()));
+        for (i, (a, b, flags)) in plan.iter().enumerate() {
+            let want = encode_records(
+                &h,
+                &ordered[a * h.stride..b * h.stride],
+                3,
+                i as u32,
+                *flags,
+            );
+            assert_eq!(c.chunk(i).unwrap(), want, "chunk {i}");
+        }
         std::fs::remove_file(&path).ok();
     }
 
