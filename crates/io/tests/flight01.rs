@@ -56,47 +56,55 @@ fn flight01_counts_stream_and_chunks() {
         assert!(s.is_complete());
         assert!(streamed == whole, "{name}: stream differs");
 
-        // One generation, 256 Ki points per chunk: sizes and flags.
+        // One generation, 256 Ki points per chunk: sizes and flags (process stride, decision 0051).
         let t = Instant::now();
         let chunks = chunk::ply_to_chunks(&bytes, 0, 256 * 1024).unwrap();
         let t_chunk = t.elapsed();
         let mut total = 0usize;
         let mut max_err = 0.0f64;
+        let mut max_step = 0.0f64;
         for (i, c) in chunks.iter().enumerate() {
             let ch = chunk::decode_header(c).unwrap();
-            assert_eq!(c.len(), chunk::HEADER_LEN + 16 * ch.point_count as usize);
+            let stride = usize::from(ch.stride);
+            assert_eq!(
+                c.len(),
+                chunk::HEADER_LEN + stride * ch.point_count as usize
+            );
             assert_eq!(ch.flags == FLAG_LAST_IN_GENERATION, i + 1 == chunks.len());
-            // Round trip (PR #8 review): colour exact, inside the chunk bbox, position ≤ 1e-5 m.
-            for (k, rec) in chunk::vertex_bytes(c)
-                .as_chunks::<16>()
-                .0
-                .iter()
-                .enumerate()
-            {
+            // Round trip: colour exact (stride 12), position within half a quantisation step.
+            let step = [0, 1, 2].map(|a| f64::from(ch.bbox_max[a] - ch.bbox_min[a]) / 65535.0);
+            max_step = max_step.max(step.into_iter().fold(0.0, f64::max));
+            for (k, rec) in chunk::vertex_bytes(c).chunks_exact(stride).enumerate() {
                 let orig = &whole[total + k];
-                let f = |o: usize| f32::from_le_bytes(rec[o..o + 4].try_into().unwrap());
-                let rel = [f(0), f(4), f(8)];
-                for (a, r) in rel.iter().enumerate() {
-                    assert!(*r >= ch.bbox_min[a] && *r <= ch.bbox_max[a], "{name}: bbox");
-                    let back = f64::from(*r) + ch.origin[a];
-                    max_err = max_err.max((back - f64::from(orig.position[a])).abs());
+                let q = [0, 1, 2].map(|a| u16::from_le_bytes([rec[2 * a], rec[2 * a + 1]]));
+                let back = ch.dequantise(q);
+                for a in 0..3 {
+                    let err =
+                        (f64::from(back[a]) + ch.origin[a] - f64::from(orig.position[a])).abs();
+                    assert!(
+                        err <= step[a] / 2.0 + 1e-4,
+                        "{name}: axis {a} error {err} m"
+                    );
+                    max_err = max_err.max(err);
                 }
-                assert_eq!(&rec[12..15], &orig.color, "{name}: colour");
-                assert_eq!(rec[15], 255);
+                if stride == 12 {
+                    assert_eq!(&rec[8..11], &orig.color, "{name}: colour");
+                    assert_eq!(rec[11], 255);
+                }
             }
             total += ch.point_count as usize;
         }
         assert_eq!(total, expected);
-        assert!(max_err <= 1e-5, "{name}: position error {max_err} m");
         let chunk_bytes: usize = chunks.iter().map(Vec::len).sum();
         println!(
-            "{name}: {expected} pts, PLY {} B → chunks {chunk_bytes} B ({} chunks); parse {:.1} ms, stream {:.1} ms, to-chunks {:.1} ms, max round-trip error {:.2e} m",
+            "{name}: {expected} pts, PLY {} B → chunks {chunk_bytes} B ({} chunks); parse {:.1} ms, stream {:.1} ms, to-chunks {:.1} ms, max round-trip error {:.2} mm (largest step {:.2} mm)",
             bytes.len(),
             chunks.len(),
             t_parse.as_secs_f64() * 1e3,
             t_stream.as_secs_f64() * 1e3,
             t_chunk.as_secs_f64() * 1e3,
-            max_err,
+            max_err * 1e3,
+            max_step * 1e3,
         );
     }
 }

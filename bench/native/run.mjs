@@ -61,6 +61,7 @@ const marks = [
   ...by('snapshot_received'),
   ...by('submitted'),
   ...by('presented'),
+  ...by('first_presented'), // first reflection of a coarse-first delivery (decision 0051)
   ...by('scene_swap'),
   ...by('sync_start'),
   ...by('sync_end'),

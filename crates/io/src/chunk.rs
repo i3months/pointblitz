@@ -1,32 +1,59 @@
-//! PointBlitz chunk format v1 (decisions 0008, 0022): what the server sends and the GPU consumes.
+//! PointBlitz chunk format v2 (decisions 0008, 0022, 0051): what the server sends and the GPU consumes.
 //!
 //! ```text
 //! offset size  field
 //!      0    4  magic "PBCK"
-//!      4    2  version = 1            (u16 LE)
+//!      4    2  version = 2            (u16 LE)
 //!      6    2  header length = 80     (u16 LE)
 //!      8    4  generation             (u32 LE)  refined snapshots start a new generation
 //!     12    4  index within generation (u32 LE)
 //!     16    4  point count            (u32 LE)
 //!     20    4  flags                  (u32 LE)  bit 0: last chunk of its generation
+//!                                               bit 1: the coarse first pass is complete
 //!     24   24  origin x, y, z         (f64 LE, ENU metres)
 //!     48   12  bbox min x, y, z       (f32 LE, relative to origin)
 //!     60   12  bbox max x, y, z       (f32 LE, relative to origin)
-//!     72    8  reserved, zero
-//!     80  16·n points, interleaved:   position f32×3 (relative to origin) + color u8×4 (sRGB, a = 255)
+//!     72    2  point stride = 12 or 8 (u16 LE)
+//!     74    6  reserved, zero
+//!     80  stride·n points:
+//!          stride 12: position u16×3, zero u16, color u8×4 (sRGB, a = 255)
+//!          stride 8:  position u16×3, color RGB565 (u16)
 //! ```
 //!
-//! The body after byte 80 is exactly a wgpu vertex buffer with stride 16
-//! (`Float32x3` at 0, `Unorm8x4` at 12), so a client copies it to the GPU without parsing.
+//! Positions are quantised to the chunk's bounding box: `p = origin + bbox_min + q / 65535 ×
+//! (bbox_max − bbox_min)`, per axis. The body after byte 80 is a wgpu vertex buffer as it is
+//! (`Uint16x4` at 0, and for stride 12 `Unorm8x4` at 8); the GPU undoes the quantisation, so a
+//! client still copies it without parsing. Version 1 (f32 positions, stride 16) is not read any more.
 
 use crate::ply::Point;
 
 pub const MAGIC: [u8; 4] = *b"PBCK";
-pub const VERSION: u16 = 1;
+pub const VERSION: u16 = 2;
 pub const HEADER_LEN: usize = 80;
-pub const POINT_STRIDE: usize = 16;
 /// Set on the last chunk of a generation: the client may swap generations after it.
 pub const FLAG_LAST_IN_GENERATION: u32 = 1;
+/// Set on the chunk that completes the coarse first pass of a full delivery (decision 0051): a
+/// client may swap to the new generation there and fill the rest in as it arrives.
+pub const FLAG_FIRST_PASS_COMPLETE: u32 = 2;
+/// Point strides of format v2 (decision 0051): RGBA8 colour, or RGB565 colour.
+pub const STRIDES: [usize; 2] = [12, 8];
+/// The stride new chunks are written with, unless [`set_stride`] chose the other one.
+pub const DEFAULT_STRIDE: usize = 12;
+
+static STRIDE: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(DEFAULT_STRIDE);
+
+/// Chooses the stride [`encode`] writes (12 or 8) for this process — to compare the two
+/// (decision 0051). Other values are ignored.
+pub fn set_stride(stride: usize) {
+    if STRIDES.contains(&stride) {
+        STRIDE.store(stride, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+/// The stride [`encode`] writes.
+pub fn stride() -> usize {
+    STRIDE.load(std::sync::atomic::Ordering::Relaxed)
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct ChunkHeader {
@@ -37,6 +64,17 @@ pub struct ChunkHeader {
     pub origin: [f64; 3],
     pub bbox_min: [f32; 3],
     pub bbox_max: [f32; 3],
+    /// Bytes per point: 12 or 8.
+    pub stride: u16,
+}
+
+impl ChunkHeader {
+    /// Position of quantised value `q` (0 … 65535 per axis), relative to the origin.
+    pub fn dequantise(&self, q: [u16; 3]) -> [f32; 3] {
+        [0, 1, 2].map(|i| {
+            self.bbox_min[i] + f32::from(q[i]) / 65535.0 * (self.bbox_max[i] - self.bbox_min[i])
+        })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -47,6 +85,8 @@ pub enum ChunkError {
     BadHeaderLength(u16),
     UnknownFlags(u32),
     ReservedNotZero,
+    /// A point stride other than 12 or 8.
+    BadStride(u16),
     /// Body length does not match the point count.
     BadLength {
         expected: usize,
@@ -62,15 +102,26 @@ impl std::fmt::Display for ChunkError {
 
 impl std::error::Error for ChunkError {}
 
-/// Encodes points into one chunk. Positions are stored relative to `origin` (chosen per chunk so
-/// f32 keeps centimetre precision far from the dataset origin — decision 0013).
+/// Encodes points into one chunk with the process stride ([`stride`]).
 pub fn encode(generation: u32, index: u32, flags: u32, points: &[Point]) -> Vec<u8> {
+    encode_with(generation, index, flags, points, stride())
+}
+
+/// Encodes points into one chunk with point stride 12 or 8 (decision 0051). The origin is chosen per
+/// chunk (decision 0013) and positions are quantised to the chunk's bounding box.
+pub fn encode_with(
+    generation: u32,
+    index: u32,
+    flags: u32,
+    points: &[Point],
+    stride: usize,
+) -> Vec<u8> {
+    assert!(STRIDES.contains(&stride), "stride 12 or 8");
     let (min, max) = bounds(points);
     // Origin: bbox centre rounded to whole metres (stable, readable, exact in f64).
     let origin = [0, 1, 2].map(|i| ((min[i] + max[i]) / 2.0).round());
     let rel = |p: [f64; 3]| [0, 1, 2].map(|i| (p[i] - origin[i]) as f32);
-
-    let mut out = Vec::with_capacity(HEADER_LEN + POINT_STRIDE * points.len());
+    let mut out = Vec::with_capacity(HEADER_LEN + stride * points.len());
     out.extend(MAGIC);
     out.extend(VERSION.to_le_bytes());
     out.extend((HEADER_LEN as u16).to_le_bytes());
@@ -93,16 +144,34 @@ pub fn encode(generation: u32, index: u32, flags: u32, points: &[Point]) -> Vec<
     for v in bmin.into_iter().chain(bmax) {
         out.extend(v.to_le_bytes());
     }
-    out.extend([0u8; 8]);
+    out.extend((stride as u16).to_le_bytes());
+    out.extend([0u8; 6]);
     debug_assert_eq!(out.len(), HEADER_LEN);
-
+    // Quantise against the stored f32 box, exactly as the GPU will undo it.
+    let scale = [0, 1, 2].map(|i| {
+        let ext = f64::from(bmax[i]) - f64::from(bmin[i]);
+        if ext > 0.0 { 65535.0 / ext } else { 0.0 }
+    });
     for p in points {
-        for v in rel(p.position.map(f64::from)) {
-            out.extend(v.to_le_bytes());
+        let r = rel(p.position.map(f64::from));
+        for i in 0..3 {
+            let q = ((f64::from(r[i]) - f64::from(bmin[i])) * scale[i]).round();
+            out.extend((q.clamp(0.0, 65535.0) as u16).to_le_bytes());
         }
-        out.extend([p.color[0], p.color[1], p.color[2], 255]);
+        let [cr, cg, cb] = p.color;
+        if stride == 12 {
+            out.extend([0, 0, cr, cg, cb, 255]);
+        } else {
+            out.extend(rgb565(cr, cg, cb).to_le_bytes());
+        }
     }
     out
+}
+
+/// sRGB bytes → RGB565 (rounded).
+pub fn rgb565(r: u8, g: u8, b: u8) -> u16 {
+    let q = |v: u8, bits: u32| ((u32::from(v) * ((1 << bits) - 1) + 127) / 255) as u16;
+    (q(r, 5) << 11) | (q(g, 6) << 5) | q(b, 5)
 }
 
 fn bounds(points: &[Point]) -> ([f64; 3], [f64; 3]) {
@@ -142,8 +211,12 @@ pub fn decode_header(bytes: &[u8]) -> Result<ChunkHeader, ChunkError> {
         return Err(ChunkError::BadHeaderLength(u16_at(6)));
     }
     let point_count = u32_at(16);
+    let stride = u16_at(72);
+    if !STRIDES.contains(&usize::from(stride)) {
+        return Err(ChunkError::BadStride(stride));
+    }
     let expected = (point_count as usize)
-        .checked_mul(POINT_STRIDE)
+        .checked_mul(usize::from(stride))
         .and_then(|b| b.checked_add(HEADER_LEN))
         .ok_or(ChunkError::BadLength {
             expected: usize::MAX,
@@ -155,12 +228,12 @@ pub fn decode_header(bytes: &[u8]) -> Result<ChunkHeader, ChunkError> {
             actual: bytes.len(),
         });
     }
-    // v1 defines one flag bit and zero reserved bytes; anything else is not a v1 chunk (PR #8 review).
+    // v2 defines two flag bits and six zero reserved bytes; anything else is not a v2 chunk.
     let flags = u32_at(20);
-    if flags & !FLAG_LAST_IN_GENERATION != 0 {
+    if flags & !(FLAG_LAST_IN_GENERATION | FLAG_FIRST_PASS_COMPLETE) != 0 {
         return Err(ChunkError::UnknownFlags(flags));
     }
-    if bytes[72..80].iter().any(|b| *b != 0) {
+    if bytes[74..80].iter().any(|b| *b != 0) {
         return Err(ChunkError::ReservedNotZero);
     }
     Ok(ChunkHeader {
@@ -171,10 +244,11 @@ pub fn decode_header(bytes: &[u8]) -> Result<ChunkHeader, ChunkError> {
         origin: [f64_at(24), f64_at(32), f64_at(40)],
         bbox_min: [f32_at(48), f32_at(52), f32_at(56)],
         bbox_max: [f32_at(60), f32_at(64), f32_at(68)],
+        stride,
     })
 }
 
-/// The vertex data of a validated chunk (stride 16), ready to copy into a GPU buffer.
+/// The vertex data of a validated chunk (stride 12 or 8), ready to copy into a GPU buffer.
 pub fn vertex_bytes(bytes: &[u8]) -> &[u8] {
     &bytes[HEADER_LEN..]
 }
@@ -281,35 +355,68 @@ mod tests {
     }
 
     #[test]
-    fn layout_is_header_80_plus_16_per_point() {
-        let c = encode(3, 1, FLAG_LAST_IN_GENERATION, &pts(5, 0.0));
-        assert_eq!(c.len(), 80 + 16 * 5);
-        assert_eq!(&c[..4], b"PBCK");
-        let h = decode_header(&c).unwrap();
-        assert_eq!(
-            (h.generation, h.index, h.point_count, h.flags),
-            (3, 1, 5, 1)
-        );
-        // First point: position relative to origin, then RGBA.
-        let v = vertex_bytes(&c);
-        let x = f32::from_le_bytes(v[0..4].try_into().unwrap());
-        assert_eq!(f64::from(x) + h.origin[0], 0.0);
-        assert_eq!(&v[12..16], &[0, 2, 3, 255]);
+    fn layout_is_header_80_plus_stride_per_point() {
+        for stride in STRIDES {
+            let c = encode_with(3, 1, FLAG_LAST_IN_GENERATION, &pts(5, 0.0), stride);
+            assert_eq!(c.len(), 80 + stride * 5);
+            assert_eq!(&c[..4], b"PBCK");
+            let h = decode_header(&c).unwrap();
+            assert_eq!(
+                (h.generation, h.index, h.point_count, h.flags, h.stride),
+                (3, 1, 5, 1, stride as u16)
+            );
+            // First point: x is the box minimum (q = 0), then the colour.
+            let v = vertex_bytes(&c);
+            assert_eq!(&v[0..2], &[0, 0]);
+            if stride == 12 {
+                assert_eq!(&v[6..12], &[0, 0, 0, 2, 3, 255]);
+            } else {
+                assert_eq!(&v[6..8], &rgb565(0, 2, 3).to_le_bytes());
+            }
+        }
     }
 
     #[test]
-    fn positions_round_trip_far_from_origin() {
-        // 5 km away: these inputs (non-negative, larger than the origin offset) survive exactly; in
-        // general the relative f32 can round — the flight-01 test bounds the error at 1e-5 m.
+    fn positions_round_trip_within_half_a_step() {
+        // 5 km from the dataset origin; the chunk spans 24.75 m in x, 99 m in y (decision 0051).
         let input = pts(100, 5000.0);
-        let c = encode(0, 0, 0, &input);
-        let h = decode_header(&c).unwrap();
-        for (i, rec) in vertex_bytes(&c).as_chunks::<16>().0.iter().enumerate() {
-            let f = |o: usize| f32::from_le_bytes(rec[o..o + 4].try_into().unwrap());
-            let back = [0, 1, 2].map(|k| (f64::from(f(k * 4)) + h.origin[k]) as f32);
-            assert_eq!(back, input[i].position);
+        for stride in STRIDES {
+            let c = encode_with(0, 0, 0, &input, stride);
+            let h = decode_header(&c).unwrap();
+            let step = [0, 1, 2].map(|k| (h.bbox_max[k] - h.bbox_min[k]) / 65535.0);
+            for (i, rec) in vertex_bytes(&c).chunks_exact(stride).enumerate() {
+                let q = [0, 1, 2].map(|k| u16::from_le_bytes([rec[2 * k], rec[2 * k + 1]]));
+                let back = h.dequantise(q);
+                for k in 0..3 {
+                    let want = f64::from(input[i].position[k]) - h.origin[k];
+                    let err = (f64::from(back[k]) - want).abs();
+                    assert!(err <= f64::from(step[k]) / 2.0 + 1e-4, "axis {k}: {err} m");
+                }
+            }
+            assert!(h.bbox_min[0] <= 0.0 && h.bbox_max[0] >= 0.0);
         }
-        assert!(h.bbox_min[0] <= 0.0 && h.bbox_max[0] >= 0.0);
+    }
+
+    #[test]
+    fn rgb565_keeps_the_ends() {
+        assert_eq!(rgb565(0, 0, 0), 0);
+        assert_eq!(rgb565(255, 255, 255), 0xffff);
+        assert_eq!(rgb565(255, 0, 0), 0xf800);
+        assert_eq!(rgb565(0, 255, 0), 0x07e0);
+        assert_eq!(rgb565(0, 0, 255), 0x001f);
+    }
+
+    #[test]
+    fn other_strides_and_flags_are_rejected() {
+        let mut c = encode_with(0, 0, 0, &pts(2, 0.0), 12);
+        c[72] = 16;
+        assert_eq!(decode_header(&c), Err(ChunkError::BadStride(16)));
+        let mut c = encode_with(0, 0, 0, &pts(2, 0.0), 12);
+        c[20] = 4;
+        assert_eq!(decode_header(&c), Err(ChunkError::UnknownFlags(4)));
+        let mut c = encode_with(0, 0, 0, &pts(2, 0.0), 12);
+        c[4] = 1; // version 1
+        assert_eq!(decode_header(&c), Err(ChunkError::UnsupportedVersion(1)));
     }
 
     #[test]
@@ -343,7 +450,7 @@ mod tests {
             })
             .collect();
         assert_eq!(h, [(7, 0, 1, 0), (7, 1, 1, FLAG_LAST_IN_GENERATION)]);
-        assert_eq!(&vertex_bytes(&got[0])[12..16], &[3, 0, 0, 255]);
+        assert_eq!(&vertex_bytes(&got[0])[8..12], &[3, 0, 0, 255]);
         // Nothing left: one empty chunk still closes the delivery.
         let empty = collect(9, 4);
         assert_eq!(empty.len(), 1);
@@ -366,16 +473,16 @@ mod tests {
         let mut bad = c.clone();
         bad[0] = b'X';
         assert_eq!(decode_header(&bad), Err(ChunkError::BadMagic));
-        let mut v2 = c.clone();
-        v2[4] = 2;
-        assert_eq!(decode_header(&v2), Err(ChunkError::UnsupportedVersion(2)));
+        let mut v3 = c.clone();
+        v3[4] = 3;
+        assert_eq!(decode_header(&v3), Err(ChunkError::UnsupportedVersion(3)));
         assert!(matches!(
             decode_header(&c[..c.len() - 1]),
             Err(ChunkError::BadLength { .. })
         ));
         let mut flags = c.clone();
-        flags[20] = 0b10;
-        assert_eq!(decode_header(&flags), Err(ChunkError::UnknownFlags(2)));
+        flags[20] = 0b100;
+        assert_eq!(decode_header(&flags), Err(ChunkError::UnknownFlags(4)));
         let mut reserved = c.clone();
         reserved[75] = 1;
         assert_eq!(decode_header(&reserved), Err(ChunkError::ReservedNotZero));

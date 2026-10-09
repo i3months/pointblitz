@@ -4,7 +4,6 @@
 use crate::camera::Camera;
 use crate::scene::Scene;
 use bytemuck::{Pod, Zeroable};
-use pointblitz_io::chunk::POINT_STRIDE;
 
 /// Depth format used by every PointBlitz target.
 pub const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
@@ -23,10 +22,12 @@ struct CameraUniform {
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct ChunkUniform {
     offset: [f32; 4],
+    scale: [f32; 4],
 }
 
 pub struct Renderer {
-    pipeline: wgpu::RenderPipeline,
+    /// Point pipelines for strides 12 and 8 (decision 0051).
+    pipelines: [wgpu::RenderPipeline; 2],
     camera_buf: wgpu::Buffer,
     camera_bg: wgpu::BindGroup,
     chunk_layout: wgpu::BindGroupLayout,
@@ -70,46 +71,51 @@ impl Renderer {
             bind_group_layouts: &[Some(&camera_layout), Some(&chunk_layout)],
             immediate_size: 0,
         });
-        let attributes = wgpu::vertex_attr_array![0 => Float32x3, 1 => Unorm8x4];
-        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("points"),
-            layout: Some(&layout),
-            vertex: wgpu::VertexState {
-                module: &shader,
-                entry_point: Some("vs"),
-                compilation_options: Default::default(),
-                buffers: &[Some(wgpu::VertexBufferLayout {
-                    array_stride: POINT_STRIDE as u64,
-                    step_mode: wgpu::VertexStepMode::Instance,
-                    attributes: &attributes,
-                })],
-            },
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleStrip,
-                ..Default::default()
-            },
-            depth_stencil: Some(wgpu::DepthStencilState {
-                format: DEPTH_FORMAT,
-                depth_write_enabled: Some(true),
-                // Reversed-Z: nearer is larger.
-                depth_compare: Some(wgpu::CompareFunction::Greater),
-                stencil: Default::default(),
-                bias: Default::default(),
-            }),
-            multisample: Default::default(),
-            fragment: Some(wgpu::FragmentState {
-                module: &shader,
-                entry_point: Some("fs"),
-                compilation_options: Default::default(),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: color_format,
-                    blend: None,
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-            }),
-            multiview_mask: None,
-            cache: None,
-        });
+        // One pipeline per point stride of chunk format v2 (decision 0051).
+        let attrs12 = wgpu::vertex_attr_array![0 => Uint16x4, 1 => Unorm8x4];
+        let attrs8 = wgpu::vertex_attr_array![0 => Uint16x4];
+        let pipeline = |stride: u64, entry: &str, attributes: &[wgpu::VertexAttribute]| {
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("points"),
+                layout: Some(&layout),
+                vertex: wgpu::VertexState {
+                    module: &shader,
+                    entry_point: Some(entry),
+                    compilation_options: Default::default(),
+                    buffers: &[Some(wgpu::VertexBufferLayout {
+                        array_stride: stride,
+                        step_mode: wgpu::VertexStepMode::Instance,
+                        attributes,
+                    })],
+                },
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleStrip,
+                    ..Default::default()
+                },
+                depth_stencil: Some(wgpu::DepthStencilState {
+                    format: DEPTH_FORMAT,
+                    depth_write_enabled: Some(true),
+                    // Reversed-Z: nearer is larger.
+                    depth_compare: Some(wgpu::CompareFunction::Greater),
+                    stencil: Default::default(),
+                    bias: Default::default(),
+                }),
+                multisample: Default::default(),
+                fragment: Some(wgpu::FragmentState {
+                    module: &shader,
+                    entry_point: Some("fs"),
+                    compilation_options: Default::default(),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: color_format,
+                        blend: None,
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                }),
+                multiview_mask: None,
+                cache: None,
+            })
+        };
+        let pipelines = [pipeline(12, "vs12", &attrs12), pipeline(8, "vs8", &attrs8)];
 
         let camera_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("camera"),
@@ -130,7 +136,7 @@ impl Renderer {
         let (chunk_buf, chunk_bg) = Self::chunk_slots(device, &chunk_layout, chunk_stride, 64);
 
         Self {
-            pipeline,
+            pipelines,
             camera_buf,
             camera_bg,
             chunk_layout,
@@ -210,9 +216,14 @@ impl Renderer {
         }
         let mut slots = vec![0u8; self.chunk_stride as usize * chunks.len()];
         for (i, c) in chunks.iter().enumerate() {
-            let d = c.origin - camera.eye;
+            let h = &c.header;
+            let min = glam::DVec3::from(h.bbox_min.map(f64::from));
+            let size = glam::DVec3::from(h.bbox_max.map(f64::from)) - min;
+            let d = c.origin + min - camera.eye;
+            let s = size / 65535.0;
             let u = ChunkUniform {
                 offset: [d.x as f32, d.y as f32, d.z as f32, 0.0],
+                scale: [s.x as f32, s.y as f32, s.z as f32, 0.0],
             };
             let at = i * self.chunk_stride as usize;
             slots[at..at + size_of::<ChunkUniform>()].copy_from_slice(bytemuck::bytes_of(&u));
@@ -249,9 +260,14 @@ impl Renderer {
             }),
             ..Default::default()
         });
-        pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, &self.camera_bg, &[]);
+        let mut bound = None;
         for (i, c) in chunks.iter().enumerate() {
+            let p = usize::from(c.header.stride != 12);
+            if bound != Some(p) {
+                pass.set_pipeline(&self.pipelines[p]);
+                bound = Some(p);
+            }
             pass.set_bind_group(1, &self.chunk_bg, &[(i as u64 * self.chunk_stride) as u32]);
             pass.set_vertex_buffer(0, c.buffer.slice(..));
             pass.draw(0..4, 0..c.points);

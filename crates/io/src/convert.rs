@@ -5,8 +5,12 @@
 //! - [`Conversion`]: reads the records a delivery sends and encodes them in parallel in the
 //!   background; readers take chunks in order as soon as each is ready, so the first chunk can leave
 //!   before the last is encoded.
+//! - Full deliveries go coarse first (decision 0051, [`coarse_order`]): every 8th point, then the
+//!   rest, so the first eighth already covers the whole scene and a client can show it at once.
 
-use crate::chunk::{FLAG_LAST_IN_GENERATION, chunk_count, chunk_records, encode_records};
+use crate::chunk::{
+    FLAG_FIRST_PASS_COMPLETE, FLAG_LAST_IN_GENERATION, chunk_count, encode_records,
+};
 use std::io::{Read, Seek, SeekFrom};
 use std::path::PathBuf;
 use std::sync::{Arc, Condvar, Mutex};
@@ -14,6 +18,61 @@ use std::time::Instant;
 
 /// Largest chunk (decision 0022).
 pub const MAX_POINTS: usize = 256 * 1024;
+
+/// Residues of the point index modulo 8, in the order a full delivery sends them (decision 0051):
+/// bit-reversed, so every prefix of passes samples the scene evenly.
+pub const PASS_ORDER: [usize; 8] = [0, 4, 2, 6, 1, 5, 3, 7];
+
+/// Reorders `stride`-byte records coarse first: indices ≡ 0 (mod 8), then 4, 2, 6, 1, 5, 3, 7.
+/// Returns the records and how many belong to the first pass (`ceil(n / 8)`). No sorting: the
+/// points of a skyrecon snapshot are spatially coherent in file order, so every 8th one already
+/// spreads over the whole scene.
+pub fn coarse_order(records: &[u8], stride: usize) -> (Vec<u8>, usize) {
+    let n = records.len() / stride;
+    let mut out = Vec::with_capacity(records.len());
+    for r in PASS_ORDER {
+        for i in (r..n).step_by(8) {
+            out.extend_from_slice(&records[i * stride..(i + 1) * stride]);
+        }
+    }
+    (out, n.div_ceil(8))
+}
+
+/// The chunks of a delivery of `n` points as (first point, end point, flags). A full delivery
+/// (`first_pass = Some(k)`) cuts the first `k` points into their own chunks and flags the last of
+/// them `FLAG_FIRST_PASS_COMPLETE`; the last chunk is `FLAG_LAST_IN_GENERATION`. Always at least
+/// one chunk.
+pub fn chunk_plan(n: usize, first_pass: Option<usize>) -> Vec<(usize, usize, u32)> {
+    let mut out = Vec::new();
+    let cut = |from: usize, to: usize, out: &mut Vec<(usize, usize, u32)>| {
+        let m = to - from;
+        for i in 0..chunk_count(m, MAX_POINTS) {
+            let a = from + (i * MAX_POINTS).min(m);
+            let b = from + ((i + 1) * MAX_POINTS).min(m);
+            out.push((a, b, 0));
+        }
+    };
+    match first_pass {
+        Some(k) if k < n => {
+            cut(0, k, &mut out);
+            if let Some(last) = out.last_mut() {
+                last.2 |= FLAG_FIRST_PASS_COMPLETE;
+            }
+            cut(k, n, &mut out);
+        }
+        Some(_) => {
+            cut(0, n, &mut out);
+            if let Some(last) = out.last_mut() {
+                last.2 |= FLAG_FIRST_PASS_COMPLETE;
+            }
+        }
+        None => cut(0, n, &mut out),
+    }
+    if let Some(last) = out.last_mut() {
+        last.2 |= FLAG_LAST_IN_GENERATION;
+    }
+    out
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Plan {
@@ -143,7 +202,16 @@ impl Conversion {
         let mut records = vec![0u8; (h.vertex_count - skip) * h.stride];
         file.seek(SeekFrom::Start((h.header_len + skip * h.stride) as u64))?;
         file.read_exact(&mut records)?;
-        let chunks = chunk_count(h.vertex_count - skip, MAX_POINTS);
+        // A full delivery goes coarse first; a delta (appended points) keeps file order.
+        let first_pass = if skip == 0 {
+            let (ordered, k) = coarse_order(&records, h.stride);
+            records = ordered;
+            Some(k)
+        } else {
+            None
+        };
+        let plan = chunk_plan(h.vertex_count - skip, first_pass);
+        let chunks = plan.len();
         {
             let mut s = self.lock();
             s.total = Some(chunks);
@@ -161,12 +229,8 @@ impl Conversion {
                         if i >= chunks {
                             break;
                         }
-                        let flags = if i + 1 == chunks {
-                            FLAG_LAST_IN_GENERATION
-                        } else {
-                            0
-                        };
-                        let part = chunk_records(&h, &records, MAX_POINTS, i);
+                        let (a, b, flags) = plan[i];
+                        let part = &records[a * h.stride..b * h.stride];
                         let c = encode_records(&h, part, self.generation, i as u32, flags);
                         self.lock().chunks[i] = Some(c);
                         self.ready.notify_all();
@@ -300,6 +364,48 @@ mod tests {
     }
 
     #[test]
+    fn coarse_order_sends_every_eighth_point_first() {
+        // 20 one-byte records 0..20.
+        let recs: Vec<u8> = (0..20).collect();
+        let (o, k) = coarse_order(&recs, 1);
+        assert_eq!(k, 3);
+        assert_eq!(&o[..3], &[0, 8, 16]);
+        assert_eq!(&o[3..6], &[4, 12, 2]);
+        let mut sorted = o.clone();
+        sorted.sort();
+        assert_eq!(sorted, recs);
+    }
+
+    #[test]
+    fn chunk_plan_flags_the_first_pass_and_the_end() {
+        let m = MAX_POINTS;
+        // Full delivery of 2.5 M points: first pass 312,752 points = 2 chunks.
+        let n = 2_502_015;
+        let p = chunk_plan(n, Some(n.div_ceil(8)));
+        assert_eq!(p[0], (0, m, 0));
+        assert_eq!(p[1], (m, n.div_ceil(8), FLAG_FIRST_PASS_COMPLETE));
+        assert_eq!(p.last().unwrap().1, n);
+        assert_eq!(p.last().unwrap().2, FLAG_LAST_IN_GENERATION);
+        assert!(p.windows(2).all(|w| w[0].1 == w[1].0));
+        assert_eq!(
+            p.iter()
+                .filter(|c| c.2 & FLAG_FIRST_PASS_COMPLETE != 0)
+                .count(),
+            1
+        );
+        // A delta has no first pass; an empty delivery is one closing chunk.
+        assert_eq!(chunk_plan(5, None), vec![(0, 5, FLAG_LAST_IN_GENERATION)]);
+        assert_eq!(
+            chunk_plan(0, Some(0)),
+            vec![(0, 0, FLAG_FIRST_PASS_COMPLETE | FLAG_LAST_IN_GENERATION)]
+        );
+        assert_eq!(
+            chunk_plan(1, Some(1)),
+            vec![(0, 1, FLAG_FIRST_PASS_COMPLETE | FLAG_LAST_IN_GENERATION)]
+        );
+    }
+
+    #[test]
     fn conversion_matches_encoding_in_one_go() {
         let mut bytes = b"ply\nformat binary_little_endian 1.0\nelement vertex 5\n\
             property float x\nproperty float y\nproperty float z\n\
@@ -316,17 +422,25 @@ mod tests {
         let h = crate::parse_header(&bytes).unwrap();
         for skip in [0, 2] {
             let c = Conversion::start(path.clone(), skip, 7);
-            assert_eq!(c.len(), Ok(1));
-            let want = encode_records(
-                &h,
-                &bytes[h.header_len + skip * h.stride..],
-                7,
-                0,
-                FLAG_LAST_IN_GENERATION,
-            );
-            assert_eq!(c.chunk(0).unwrap(), want);
-            assert_eq!(c.take(0).unwrap(), want);
-            assert!(c.chunk(1).is_err());
+            let body = &bytes[h.header_len + skip * h.stride..];
+            let (records, flags) = if skip == 0 {
+                // 5 points: first pass = points 0 (and nothing else ≡ 0 mod 8), in one chunk; the
+                // rest (4, 2, 1, 3) in the next.
+                let (o, k) = coarse_order(body, h.stride);
+                assert_eq!(k, 1);
+                assert_eq!(c.len(), Ok(2));
+                let first = encode_records(&h, &o[..h.stride], 7, 0, FLAG_FIRST_PASS_COMPLETE);
+                assert_eq!(c.chunk(0).unwrap(), first);
+                (o[h.stride..].to_vec(), FLAG_LAST_IN_GENERATION)
+            } else {
+                assert_eq!(c.len(), Ok(1));
+                (body.to_vec(), FLAG_LAST_IN_GENERATION)
+            };
+            let i = if skip == 0 { 1 } else { 0 };
+            let want = encode_records(&h, &records, 7, i as u32, flags);
+            assert_eq!(c.chunk(i).unwrap(), want);
+            assert_eq!(c.take(i).unwrap(), want);
+            assert!(c.chunk(i + 1).is_err());
         }
         std::fs::remove_file(&path).ok();
     }

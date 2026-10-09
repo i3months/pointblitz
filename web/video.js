@@ -99,7 +99,7 @@ pb.phaseReports = [];
 function notePhase(t, meta) {
   const f = pb.frames;
   if (!reportPhase || f.length < 10) return;
-  if (!meta || meta.visible.length || t - meta.rx > 3) return;
+  if (!meta || meta.visible.length || meta.first_visible?.length || t - meta.rx > 3) return;
   const d = [];
   for (let i = Math.max(1, f.length - 60); i < f.length; i++) d.push(f[i] - f[i - 1]);
   d.sort((a, b) => a - b);
@@ -163,7 +163,12 @@ function present(frame, meta) {
     streaming = false;
     mark('orbit_end', { frame: meta.frame });
   }
-  // A snapshot is presented when the first frame that shows it is drawn.
+  // A snapshot is presented when the first frame that shows it is drawn; a coarse-first delivery's
+  // first pass is its first reflection (decision 0051).
+  for (const seq of meta.first_visible ?? []) {
+    mark('first_presented', { seq, frame: meta.frame });
+    onScreen(pb.marks[pb.marks.length - 1]);
+  }
   for (const seq of meta.visible) {
     mark('presented', { seq, frame: meta.frame });
     onScreen(pb.marks[pb.marks.length - 1]);
