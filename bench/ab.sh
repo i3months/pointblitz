@@ -4,10 +4,10 @@
 # within the session does not favour one side.
 #
 # usage: bash bench/ab.sh <before repo> <ply dir> <out dir>        (run from the after repository root)
-# env:   COLD=10 X60=10 IMPLS="web webgl native video" PORT=8871
+# env:   COLD=10 X60=10 IMPLS="web webgl native video" PORT=8871 VIDEO_DATA=after|both
 #        <before repo> is a worktree of the earlier commit, built here (release binaries, web module).
 #
-# Names: <impl>-<before|after>-<scenario>-<i>. web runs also keep their raw marks (<name>.raw.json)
+# Names: <impl>-<before|after>-<scenario>-<i>. web and webgl runs also keep their raw marks (<name>.raw.json)
 # for the stage split. The video server of the after build reads the snapshots locally (--data);
 # the before build fetches /chunks as it did. Validity and redo are the same as bench/suite.sh
 # (gpu-watch, C1/C3/C4 per run, one redo, C2 at the end). The browser receive floor (a 40 MB static
@@ -67,11 +67,12 @@ run() { # impl side scenario index
   echo "$(date +%H:%M:%S) $name"
   case $impl in
     web) cmd=(node baseline/three/run.mjs --server "${URL[$side]}" --target web --label "web-$side" --scenario "$scen" --speed $speed --metrics "$ABS_OUT/$name.jsonl" --raw "$ABS_OUT/$name.raw.json") ;;
-    webgl) cmd=(node baseline/three/run.mjs --server "${URL[$side]}" --target web --label "webgl-$side" --chrome-args disable-features=WebGPUService --scenario "$scen" --speed $speed --metrics "$ABS_OUT/$name.jsonl") ;;
+    webgl) cmd=(node baseline/three/run.mjs --server "${URL[$side]}" --target web --label "webgl-$side" --chrome-args disable-features=WebGPUService --scenario "$scen" --speed $speed --metrics "$ABS_OUT/$name.jsonl" --raw "$ABS_OUT/$name.raw.json") ;;
     native) cmd=(node bench/native/run.mjs --server "${URL[$side]}" --scenario "$scen" --speed $speed --exe "$repo/target/release/pointblitz-native$EXT" --metrics "$ABS_OUT/$name.jsonl") ;;
     video)
       cmd=(node bench/video/run.mjs --server "${URL[$side]}" --port $((PORT + 100)) --scenario "$scen" --speed $speed --exe "$repo/target/release/pb-ab-serve$EXT" --metrics "$ABS_OUT/$name.jsonl" --log "$ABS_OUT/$name.server.log")
-      if [ "$side" = after ]; then cmd+=(--data "$DATA"); fi
+      # VIDEO_DATA=both: the before build reads locally as well (P4.14, both builds have decision 0050).
+      if [ "$side" = after ] || [ "${VIDEO_DATA:-after}" = both ]; then cmd+=(--data "$DATA"); fi
       ;;
   esac
   local try r f
