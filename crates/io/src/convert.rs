@@ -335,8 +335,9 @@ impl Conversion {
         // pass (every 8th point) is gathered and encoded before the other passes are even put in
         // order, so its chunks leave as early as possible (P4.14, decision 0051).
         // A full delivery goes coarse first, pass by pass, each chunk read in place every 8th record
-        // (P4.16: no gathering of the other passes); a delta keeps file order. Chunks are encoded
-        // by all cores in plan order, so the first pass's chunks are ready first.
+        // (P4.16: no gathering of the other passes); a delta keeps file order. The first pass is
+        // done first by every core (P4.17): its points are read in pieces across the cores, then
+        // its chunks encoded; only then the other chunks, by all cores in plan order.
         let plan = piece_plan(n, skip == 0, self.max_points);
         let chunks = plan.len();
         {
@@ -346,9 +347,55 @@ impl Conversion {
             s.read_ms = self.started.elapsed().as_secs_f64() * 1e3;
         }
         self.ready.notify_all();
-        let next = std::sync::atomic::AtomicUsize::new(0);
+        // Chunks up to and including the one that completes the first pass.
+        let first = plan
+            .iter()
+            .position(|c| c.flags & FLAG_FIRST_PASS_COMPLETE != 0)
+            .map_or(0, |i| i + 1);
+        if first > 0 {
+            // Points of the first-pass chunks, read in about one piece per core.
+            let mut points: Vec<Vec<crate::Point>> = plan[..first]
+                .iter()
+                .map(|c| {
+                    vec![
+                        crate::Point {
+                            position: [0.0; 3],
+                            color: [0; 3]
+                        };
+                        c.count
+                    ]
+                })
+                .collect();
+            let total: usize = plan[..first].iter().map(|c| c.count).sum();
+            let slice = total.div_ceil(workers).max(1);
+            std::thread::scope(|scope| {
+                for (piece, out) in plan[..first].iter().zip(points.iter_mut()) {
+                    for (k, part) in out.chunks_mut(slice).enumerate() {
+                        let h = &h;
+                        let records = &records;
+                        scope.spawn(move || {
+                            for (j, p) in part.iter_mut().enumerate() {
+                                let at = (piece.start + (k * slice + j) * piece.step) * h.stride;
+                                *p = h.point(&records[at..at + h.stride]);
+                            }
+                        });
+                    }
+                }
+            });
+            std::thread::scope(|scope| {
+                for (i, pts) in points.iter().enumerate() {
+                    let flags = plan[i].flags;
+                    scope.spawn(move || {
+                        let c = crate::chunk::encode(self.generation, i as u32, flags, pts);
+                        self.lock().chunks[i] = Some(c);
+                        self.ready.notify_all();
+                    });
+                }
+            });
+        }
+        let next = std::sync::atomic::AtomicUsize::new(first);
         std::thread::scope(|scope| {
-            for _ in 0..workers.min(chunks) {
+            for _ in 0..workers.min(chunks - first) {
                 scope.spawn(|| {
                     loop {
                         let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
