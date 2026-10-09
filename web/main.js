@@ -15,7 +15,8 @@
 // Hooks on window.__pb (read by bench/web/*.mjs and the baseline harness): marks [{name, t, ...}],
 // frames [t], longtasks [{t, ms}], info, gpu, setView(name), ready, done. Mark names follow the
 // baseline and the native client (decision 0020): snapshot_received, fetch_start, headers,
-// first_chunk, last_chunk_received, uploaded, submitted, presented, fetch_end.
+// first_chunk, last_chunk_received, uploaded, submitted, presented, fetch_end; for a coarse-first
+// delivery also first_pass_uploaded and first_presented (decision 0051: the new generation is shown).
 
 import { ChunkSplitter } from './chunks.js';
 import { glTimer } from './gltimer.js';
@@ -39,7 +40,7 @@ let viewpoints = [];
 let fov = 50;
 let dirty = false;
 let waiters = [];
-let toPresent = []; // snapshots whose last chunk is in the scene but not drawn yet
+let toPresent = []; // [seq, 'first' | 'all'] in the scene but not drawn yet
 let stopLoop = false; // orbit draws its own frames
 
 // Draw only when something changed (decision 0027); the loop itself costs nothing when idle.
@@ -51,7 +52,7 @@ function frame(t) {
     viewer.render();
     const seqs = toPresent;
     toPresent = [];
-    for (const seq of seqs) mark('submitted', { seq });
+    for (const [seq, what] of seqs) if (what === 'all') mark('submitted', { seq });
     const w = waiters;
     waiters = [];
     // presented = the GPU finished the first frame that shows the whole snapshot (decision 0020).
@@ -59,7 +60,7 @@ function frame(t) {
     // (decision 0033), so ordinary frames do not call it.
     if (seqs.length || w.length) {
       viewer.gpu_done().then(() => {
-        for (const seq of seqs) mark('presented', { seq });
+        for (const [seq, what] of seqs) mark(what === 'all' ? 'presented' : 'first_presented', { seq });
         for (const resolve of w) resolve();
       });
     }
@@ -144,7 +145,7 @@ async function deliver(snap) {
   let uploadMs = 0;
   let chunkMaxMs = 0; // longest single chunk on the main thread (PR #16 review: must stay < 50 ms)
   let lastSeen = false;
-  const splitter = new ChunkSplitter((chunk, last) => {
+  const splitter = new ChunkSplitter((chunk, last, firstPass) => {
     const t0 = performance.now();
     if (first) {
       first = false;
@@ -156,10 +157,16 @@ async function deliver(snap) {
     uploadMs += ms;
     chunkMaxMs = Math.max(chunkMaxMs, ms);
     dirty = true; // progressive first generation and appends are visible right away
+    if (firstPass && !last) {
+      // The new generation is in the scene from here on (decision 0051): its first presented frame
+      // is the snapshot's first reflection.
+      mark('first_pass_uploaded', { seq: snap.seq, points: viewer.points() });
+      toPresent.push([snap.seq, 'first']);
+    }
     if (last) {
       lastSeen = true;
       mark('uploaded', { seq: snap.seq, points: viewer.points(), gpu_bytes: viewer.gpu_bytes(), upload_ms: uploadMs, chunk_max_ms: chunkMaxMs });
-      toPresent.push(snap.seq);
+      toPresent.push([snap.seq, 'all']);
     }
   });
   const reader = res.body.getReader();

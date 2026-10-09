@@ -2,12 +2,18 @@
 //! (P1.3, decisions 0017, 0020).
 //!
 //! - `capture --ply <file> --viewpoints <json> --out <dir> [--width 1920 --height 1080]`
+//!   `[--stride 12|8] [--base <file>]` (decision 0051): the scene is built from the chunks as they
+//!   are delivered — a coarse-first full delivery of `--ply`, or, with `--base`, a full delivery
+//!   of the base snapshot followed by the delta of `--ply` — and the quantisation of those chunks
+//!   (box size, step, largest position error against the PLY) is printed. `--file-order` builds one
+//!   generation in file order instead (diagnosis).
 //! - `compare <dir A> <dir B> [--viewpoints <json>] [--md <file>]`
 
 use crate::image::{Rgba, coverage, read_png, write_png};
 use crate::ssim::{ssim_rgba, ssim_rgba_masked};
 use pointblitz_core::{Camera, Headless, Scene};
-use pointblitz_io::chunk::ply_to_chunks;
+use pointblitz_io::chunk::{self, decode_header, vertex_bytes};
+use pointblitz_io::convert::{Conversion, coarse_order};
 use std::fmt::Write as _;
 use std::time::Instant;
 
@@ -68,13 +74,30 @@ pub fn run_capture(args: &[String]) -> Result<(), String> {
         info.name, info.backend, info.driver_info
     );
 
-    let bytes = std::fs::read(ply).map_err(|e| format!("{ply}: {e}"))?;
-    let chunks = ply_to_chunks(&bytes, 0, 256 * 1024).map_err(|e| format!("{ply}: {e}"))?;
+    if let Some(s) = arg(args, "--stride") {
+        let s: usize = s.parse().map_err(|_| "--stride 12|8")?;
+        if !chunk::STRIDES.contains(&s) {
+            return Err("--stride 12|8".into());
+        }
+        chunk::set_stride(s);
+    }
+    // --file-order (diagnosis): one generation in file order, without the coarse-first order.
+    let chunks = if args.iter().any(|a| a == "--file-order") {
+        let bytes = std::fs::read(ply).map_err(|e| format!("{ply}: {e}"))?;
+        chunk::ply_to_chunks(&bytes, 0, 256 * 1024).map_err(|e| format!("{ply}: {e}"))?
+    } else {
+        delivered(ply, arg(args, "--base"))?
+    };
     let mut scene = Scene::new();
     for c in &chunks {
         scene.insert(&device, c).map_err(|e| e.to_string())?;
     }
-    eprintln!("{} points in {} chunks", scene.points(), chunks.len());
+    eprintln!(
+        "{} points in {} chunks (stride {})",
+        scene.points(),
+        chunks.len(),
+        chunk::stride()
+    );
 
     let mut hl = Headless::new(&device, [w, h]);
     for v in &views {
@@ -166,4 +189,80 @@ pub fn run_compare(args: &[String]) -> Result<(), String> {
         std::fs::write(path, &md).map_err(|e| format!("{path}: {e}"))?;
     }
     Ok(())
+}
+
+/// The chunks a client receives for `ply` (decision 0051): a coarse-first full delivery, or with
+/// `base` a full delivery of the base snapshot and then the delta of `ply` (`ply` must append to
+/// `base`). Prints the quantisation of each part.
+fn delivered(ply: &str, base: Option<&str>) -> Result<Vec<Vec<u8>>, String> {
+    let read = |path: &str| -> Result<(Vec<u8>, pointblitz_io::Header), String> {
+        let bytes = std::fs::read(path).map_err(|e| format!("{path}: {e}"))?;
+        let h = pointblitz_io::parse_header(&bytes).map_err(|e| format!("{path}: {e}"))?;
+        Ok((bytes, h))
+    };
+    let take_all = |c: &Conversion| -> Result<Vec<Vec<u8>>, String> {
+        (0..c.len()?).map(|i| c.take(i)).collect()
+    };
+    let mut out = Vec::new();
+    match base {
+        None => {
+            let (bytes, h) = read(ply)?;
+            let c = take_all(&Conversion::start(ply.into(), 0, 0))?;
+            let (ordered, _) = coarse_order(&bytes[h.header_len..], h.stride);
+            report("full (coarse first)", &c, &h, &ordered);
+            out.extend(c);
+        }
+        Some(base) => {
+            let (bb, bh) = read(base)?;
+            let full = take_all(&Conversion::start(base.into(), 0, 0))?;
+            let (ordered, _) = coarse_order(&bb[bh.header_len..], bh.stride);
+            report("base full (coarse first)", &full, &bh, &ordered);
+            let (pb, ph) = read(ply)?;
+            let delta = take_all(&Conversion::start(ply.into(), bh.vertex_count, 0))?;
+            report(
+                "delta",
+                &delta,
+                &ph,
+                &pb[ph.header_len + bh.vertex_count * ph.stride..],
+            );
+            out.extend(full);
+            out.extend(delta);
+        }
+    }
+    Ok(out)
+}
+
+/// Box size, quantisation step and the largest position error of `chunks`, whose points are the
+/// PLY `records` in that order.
+fn report(what: &str, chunks: &[Vec<u8>], h: &pointblitz_io::Header, records: &[u8]) {
+    let mut sizes = Vec::new();
+    let mut max_err = 0.0f64;
+    let mut k = 0usize;
+    for c in chunks {
+        let ch = decode_header(c).expect("valid chunk");
+        let size = (0..3)
+            .map(|a| f64::from(ch.bbox_max[a] - ch.bbox_min[a]))
+            .fold(0.0, f64::max);
+        sizes.push(size);
+        for rec in vertex_bytes(c).chunks_exact(usize::from(ch.stride)) {
+            let q = [0, 1, 2].map(|a| u16::from_le_bytes([rec[2 * a], rec[2 * a + 1]]));
+            let back = ch.dequantise(q);
+            let orig = h.point(&records[k * h.stride..(k + 1) * h.stride]);
+            for ((b, o), p) in back.iter().zip(ch.origin).zip(orig.position) {
+                max_err = max_err.max((f64::from(*b) + o - f64::from(p)).abs());
+            }
+            k += 1;
+        }
+    }
+    sizes.sort_by(f64::total_cmp);
+    let median = sizes.get(sizes.len() / 2).copied().unwrap_or(0.0);
+    let largest = sizes.last().copied().unwrap_or(0.0);
+    println!(
+        "{what}: {} chunks, {k} points; box (largest side) median {median:.1} m, max {largest:.1} m; \
+         step median {:.2} mm, max {:.2} mm; largest position error {:.2} mm",
+        chunks.len(),
+        median / 65535.0 * 1e3,
+        largest / 65535.0 * 1e3,
+        max_err * 1e3
+    );
 }

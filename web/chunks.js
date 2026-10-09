@@ -1,8 +1,10 @@
-// Chunk stream framing for the browser client (decision 0022, 0030).
+// Chunk stream framing for the browser client (decisions 0022, 0030, 0051).
 
 /**
- * Cuts a byte stream into chunks (decision 0022: point_count at byte 16, 80 B + 16 B/point) and
- * calls onChunk(bytes, last) for each complete one. Each chunk is copied once into its own buffer.
+ * Cuts a byte stream into chunks (decisions 0022, 0051: point_count at byte 16, point stride at
+ * byte 72, 80 B + stride × points) and calls onChunk(bytes, last, firstPass) for each complete one —
+ * last = last chunk of its generation, firstPass = completes the coarse first pass. Each chunk is
+ * copied once into its own buffer.
  */
 export class ChunkSplitter {
   constructor(onChunk) {
@@ -24,8 +26,12 @@ export class ChunkSplitter {
         if (this.headLen < 80) return;
         const view = new DataView(this.head.buffer);
         const points = view.getUint32(16, true);
-        this.last = (view.getUint32(20, true) & 1) !== 0;
-        this.body = new Uint8Array(80 + 16 * points);
+        const flags = view.getUint32(20, true);
+        this.last = (flags & 1) !== 0;
+        this.firstPass = (flags & 2) !== 0;
+        const stride = view.getUint16(72, true);
+        if (stride !== 12 && stride !== 8) throw new Error(`chunk point stride ${stride}`);
+        this.body = new Uint8Array(80 + stride * points);
         this.body.set(this.head);
         this.bodyLen = 80;
       }
@@ -37,7 +43,7 @@ export class ChunkSplitter {
         const chunk = this.body;
         this.body = null;
         this.headLen = 0;
-        this.onChunk(chunk, this.last);
+        this.onChunk(chunk, this.last, this.firstPass);
       }
     }
   }

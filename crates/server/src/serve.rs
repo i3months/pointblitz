@@ -15,7 +15,8 @@
 //! Each frame is one binary WebSocket message: `u32 LE metadata length`, the metadata (UTF-8 JSON),
 //! then the H.264 access unit (Annex B). Metadata: `frame` (counter), `idr`, `t_ms` (server clock,
 //! ms since start, when the frame's tick began), `render_ms`, `encode_ms`, `visible` (snapshots that
-//! became fully visible in this frame), `snapshot` (newest fully visible snapshot), `input` (last
+//! became fully visible in this frame), `first_visible` (snapshots whose coarse first pass became
+//! visible in this frame, decision 0051), `snapshot` (newest fully visible snapshot), `input` (last
 //! applied input id), `points`.
 //!
 //! `--wait-for-client` starts following the replay only once a client is connected, so a test or
@@ -405,11 +406,15 @@ pub fn run(args: &[String]) -> Result<(), String> {
     loop {
         let tick_start = Instant::now();
         let mut visible = Vec::new();
+        let mut first_visible = Vec::new();
         while let Ok(m) = msg_rx.try_recv() {
             match m {
                 Msg::Chunk {
                     seq, bytes, last, ..
                 } => {
+                    let first_pass = pointblitz_io::chunk::decode_header(&bytes).is_ok_and(|h| {
+                        h.flags & pointblitz_io::chunk::FLAG_FIRST_PASS_COMPLETE != 0
+                    });
                     match scene.insert(&device, &bytes) {
                         Ok(Inserted::Stale) => eprintln!("snapshot {seq}: stale chunk"),
                         Ok(_) => {}
@@ -418,6 +423,8 @@ pub fn run(args: &[String]) -> Result<(), String> {
                     if last {
                         visible.push(seq);
                         newest_visible = Some(seq);
+                    } else if first_pass {
+                        first_visible.push(seq);
                     }
                 }
                 Msg::End => ended_at = Some(Instant::now()),
@@ -496,11 +503,12 @@ pub fn run(args: &[String]) -> Result<(), String> {
         let mut meta = String::new();
         write!(
             meta,
-            "{{\"frame\":{frame},\"idr\":{},\"t_ms\":{:.3},\"render_ms\":{render_ms:.3},\"encode_ms\":{:.3},\"visible\":{:?},\"snapshot\":{},\"input\":{last_input},\"points\":{},\"phase\":\"{phase}\"}}",
+            "{{\"frame\":{frame},\"idr\":{},\"t_ms\":{:.3},\"render_ms\":{render_ms:.3},\"encode_ms\":{:.3},\"visible\":{:?},\"first_visible\":{:?},\"snapshot\":{},\"input\":{last_input},\"points\":{},\"phase\":\"{phase}\"}}",
             f.idr,
             tick_start.duration_since(t0).as_secs_f64() * 1e3,
             f.upload_ms + f.encode_ms,
             visible,
+            first_visible,
             newest_visible.map_or("null".into(), |s| s.to_string()),
             scene.points()
         )

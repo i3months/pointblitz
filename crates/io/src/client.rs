@@ -7,7 +7,7 @@
 //!   as soon as its bytes are complete (decision 0026) — or, with a local data directory (decision
 //!   0050), reads the snapshot's PLY there and converts it in this process, without HTTP.
 
-use crate::chunk::{FLAG_LAST_IN_GENERATION, HEADER_LEN, MAGIC, POINT_STRIDE, decode_header};
+use crate::chunk::{FLAG_LAST_IN_GENERATION, HEADER_LEN, MAGIC, decode_header};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
 use std::path::PathBuf;
@@ -113,7 +113,8 @@ pub fn read_chunk(r: &mut impl Read) -> std::io::Result<Option<Vec<u8>>> {
             n => got += n,
         }
     }
-    // point_count sits at bytes 16..20 (decision 0022); the whole chunk is validated once read.
+    // point_count sits at bytes 16..20 and the point stride at 72..74 (decisions 0022, 0051); the
+    // whole chunk is validated once read.
     if buf[..4] != MAGIC {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
@@ -121,7 +122,14 @@ pub fn read_chunk(r: &mut impl Read) -> std::io::Result<Option<Vec<u8>>> {
         ));
     }
     let n = u32::from_le_bytes([buf[16], buf[17], buf[18], buf[19]]) as usize;
-    buf.resize(HEADER_LEN + n * POINT_STRIDE, 0);
+    let stride = usize::from(u16::from_le_bytes([buf[72], buf[73]]));
+    if !crate::chunk::STRIDES.contains(&stride) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("point stride {stride}"),
+        ));
+    }
+    buf.resize(HEADER_LEN + n * stride, 0);
     r.read_exact(&mut buf[HEADER_LEN..])?;
     decode_header(&buf).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
     Ok(Some(buf))
