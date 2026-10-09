@@ -382,6 +382,10 @@ let stopLoop = false;
 async function frame(t) {
   if (stopLoop) return;
   pb.frames.push(t);
+  // WebGPU (B1-webgpu): ask for the next frame before waiting for the GPU below, so a slow
+  // completion signal cannot make the loop skip a display cycle (P4.18: the page ran at 30 Hz).
+  // WebGL2 syncs in place and keeps its order.
+  if (webgpu) requestAnimationFrame(frame);
   // B0 draws every frame (decision 0005); B1/B2 only when something changed.
   if (mode === 'full' || dirty || pendingPresent.length || pendingFirst.length) {
     dirty = false;
@@ -406,7 +410,7 @@ async function frame(t) {
       for (const seq of seqs) mark('presented', { seq, points: shownPoints || undefined });
     }
   }
-  requestAnimationFrame(frame);
+  if (!webgpu) requestAnimationFrame(frame);
 }
 
 async function main() {
