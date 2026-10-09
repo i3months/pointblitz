@@ -43,12 +43,17 @@ pub fn coarse_order(records: &[u8], stride: usize) -> (Vec<u8>, usize) {
 /// them `FLAG_FIRST_PASS_COMPLETE`; the last chunk is `FLAG_LAST_IN_GENERATION`. Always at least
 /// one chunk.
 pub fn chunk_plan(n: usize, first_pass: Option<usize>) -> Vec<(usize, usize, u32)> {
+    chunk_plan_with(n, first_pass, MAX_POINTS)
+}
+
+/// [`chunk_plan`] with another largest chunk (tests).
+fn chunk_plan_with(n: usize, first_pass: Option<usize>, max: usize) -> Vec<(usize, usize, u32)> {
     let mut out = Vec::new();
     let cut = |from: usize, to: usize, out: &mut Vec<(usize, usize, u32)>| {
         let m = to - from;
-        for i in 0..chunk_count(m, MAX_POINTS) {
-            let a = from + (i * MAX_POINTS).min(m);
-            let b = from + ((i + 1) * MAX_POINTS).min(m);
+        for i in 0..chunk_count(m, max) {
+            let a = from + (i * max).min(m);
+            let b = from + ((i + 1) * max).min(m);
             out.push((a, b, 0));
         }
     };
@@ -164,18 +169,25 @@ pub struct Conversion {
     started: Instant,
     pub skip: usize,
     pub generation: u32,
+    /// Largest chunk (MAX_POINTS outside tests).
+    max_points: usize,
 }
 
 impl Conversion {
     /// Starts converting the records after the first `skip` points of the PLY at `path`, as chunks
     /// of `generation`. Encoding uses up to one thread per core.
     pub fn start(path: PathBuf, skip: usize, generation: u32) -> Arc<Self> {
+        Self::start_with(path, skip, generation, MAX_POINTS)
+    }
+
+    fn start_with(path: PathBuf, skip: usize, generation: u32, max_points: usize) -> Arc<Self> {
         let c = Arc::new(Self {
             state: Mutex::new(State::default()),
             ready: Condvar::new(),
             started: Instant::now(),
             skip,
             generation,
+            max_points,
         });
         let work = Arc::clone(&c);
         std::thread::spawn(move || {
@@ -199,18 +211,35 @@ impl Conversion {
         (&mut file).take(64 * 1024).read_to_end(&mut head)?;
         let h = crate::parse_header(&head).map_err(invalid)?;
         let skip = self.skip.min(h.vertex_count);
-        let mut records = vec![0u8; (h.vertex_count - skip) * h.stride];
-        file.seek(SeekFrom::Start((h.header_len + skip * h.stride) as u64))?;
-        file.read_exact(&mut records)?;
-        // A full delivery goes coarse first; a delta (appended points) keeps file order.
-        let first_pass = if skip == 0 {
-            let (ordered, k) = coarse_order(&records, h.stride);
-            records = ordered;
-            Some(k)
-        } else {
-            None
-        };
-        let plan = chunk_plan(h.vertex_count - skip, first_pass);
+        let n = h.vertex_count - skip;
+        let workers = std::thread::available_parallelism().map_or(4, |n| n.get());
+        // Read the records in parallel pieces (P4.14: one read of 67 MB took about 18 ms).
+        let mut records = vec![0u8; n * h.stride];
+        let base = (h.header_len + skip * h.stride) as u64;
+        let piece = records.len().div_ceil(workers).max(1);
+        std::thread::scope(|scope| -> std::io::Result<()> {
+            let parts: Vec<_> = records
+                .chunks_mut(piece)
+                .enumerate()
+                .map(|(i, part)| {
+                    scope.spawn(move || -> std::io::Result<()> {
+                        let mut f = std::fs::File::open(path)?;
+                        f.seek(SeekFrom::Start(base + (i * piece) as u64))?;
+                        f.read_exact(part)
+                    })
+                })
+                .collect();
+            for p in parts {
+                p.join()
+                    .map_err(|_| std::io::Error::other("reader panicked"))??;
+            }
+            Ok(())
+        })?;
+        // A full delivery goes coarse first; a delta (appended points) keeps file order. The first
+        // pass (every 8th point) is gathered and encoded before the other passes are even put in
+        // order, so its chunks leave as early as possible (P4.14, decision 0051).
+        let k = n.div_ceil(8);
+        let plan = chunk_plan_with(n, (skip == 0).then_some(k), self.max_points);
         let chunks = plan.len();
         {
             let mut s = self.lock();
@@ -219,25 +248,53 @@ impl Conversion {
             s.read_ms = self.started.elapsed().as_secs_f64() * 1e3;
         }
         self.ready.notify_all();
-        let workers = std::thread::available_parallelism().map_or(4, |n| n.get());
-        let next = std::sync::atomic::AtomicUsize::new(0);
-        std::thread::scope(|scope| {
-            for _ in 0..workers.min(chunks) {
-                scope.spawn(|| {
-                    loop {
-                        let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                        if i >= chunks {
-                            break;
+        // Encodes plan entries [lo, hi) whose points start at plan[lo].0 in `src`.
+        let encode = |src: &[u8], lo: usize, hi: usize| {
+            let from = plan.get(lo).map_or(0, |c| c.0);
+            let next = std::sync::atomic::AtomicUsize::new(lo);
+            std::thread::scope(|scope| {
+                for _ in 0..workers.min(hi - lo) {
+                    scope.spawn(|| {
+                        loop {
+                            let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            if i >= hi {
+                                break;
+                            }
+                            let (a, b, flags) = plan[i];
+                            let part = &src[(a - from) * h.stride..(b - from) * h.stride];
+                            let c = encode_records(&h, part, self.generation, i as u32, flags);
+                            self.lock().chunks[i] = Some(c);
+                            self.ready.notify_all();
                         }
-                        let (a, b, flags) = plan[i];
-                        let part = &records[a * h.stride..b * h.stride];
-                        let c = encode_records(&h, part, self.generation, i as u32, flags);
-                        self.lock().chunks[i] = Some(c);
-                        self.ready.notify_all();
-                    }
-                });
+                    });
+                }
+            });
+        };
+        if skip == 0 {
+            let first_chunks = plan
+                .iter()
+                .take_while(|c| c.1 <= k)
+                .count()
+                .max(1)
+                .min(chunks);
+            let mut first = Vec::with_capacity(k * h.stride);
+            for i in (0..n).step_by(8) {
+                first.extend_from_slice(&records[i * h.stride..(i + 1) * h.stride]);
             }
-        });
+            encode(&first, 0, first_chunks);
+            drop(first);
+            if first_chunks < chunks {
+                let mut rest = Vec::with_capacity((n - k) * h.stride);
+                for r in &PASS_ORDER[1..] {
+                    for i in (*r..n).step_by(8) {
+                        rest.extend_from_slice(&records[i * h.stride..(i + 1) * h.stride]);
+                    }
+                }
+                encode(&rest, first_chunks, chunks);
+            }
+        } else {
+            encode(&records, 0, chunks);
+        }
         self.lock().done_ms = Some(self.started.elapsed().as_secs_f64() * 1e3);
         self.ready.notify_all();
         Ok(())
@@ -403,6 +460,53 @@ mod tests {
             chunk_plan(1, Some(1)),
             vec![(0, 1, FLAG_FIRST_PASS_COMPLETE | FLAG_LAST_IN_GENERATION)]
         );
+    }
+
+    #[test]
+    fn first_pass_early_gives_the_same_chunks() {
+        // 37 points, chunks of 3: the first pass (5 points) spans 2 chunks, the rest 11 more.
+        let n = 37u8;
+        let mut bytes = format!(
+            "ply\nformat binary_little_endian 1.0\nelement vertex {n}\nproperty float x\n\
+             property float y\nproperty float z\nproperty uchar red\nproperty uchar green\n\
+             property uchar blue\nend_header\n"
+        )
+        .into_bytes();
+        for i in 0..n {
+            for v in [f32::from(i), f32::from(i % 5), -1.0] {
+                bytes.extend_from_slice(&v.to_le_bytes());
+            }
+            bytes.extend_from_slice(&[i, 2 * i, 255 - i]);
+        }
+        let path = std::env::temp_dir().join(format!("pb-first-pass-{}.ply", std::process::id()));
+        std::fs::write(&path, &bytes).unwrap();
+        let h = crate::parse_header(&bytes).unwrap();
+        let body = &bytes[h.header_len..];
+        // Reference: the whole delivery put in coarse order at once, cut by the same plan.
+        let (ordered, k) = coarse_order(body, h.stride);
+        let plan = chunk_plan_with(usize::from(n), Some(k), 3);
+        assert_eq!(plan.len(), 2 + 11);
+        assert_eq!(plan[1].2, FLAG_FIRST_PASS_COMPLETE);
+        let c = Conversion::start_with(path.clone(), 0, 9, 3);
+        assert_eq!(c.len(), Ok(plan.len()));
+        for (i, (a, b, flags)) in plan.iter().enumerate() {
+            let want = encode_records(
+                &h,
+                &ordered[a * h.stride..b * h.stride],
+                9,
+                i as u32,
+                *flags,
+            );
+            assert_eq!(c.chunk(i).unwrap(), want, "chunk {i}");
+        }
+        // A delta keeps file order.
+        let d = Conversion::start_with(path.clone(), 30, 9, 3);
+        assert_eq!(d.len(), Ok(3));
+        assert_eq!(
+            d.chunk(2).unwrap(),
+            encode_records(&h, &body[36 * h.stride..], 9, 2, FLAG_LAST_IN_GENERATION)
+        );
+        std::fs::remove_file(&path).ok();
     }
 
     #[test]
