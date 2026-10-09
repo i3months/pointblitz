@@ -76,8 +76,7 @@ What Rust, wgpu and wasm themselves add — same data, same graphics API
 - Most of the gain over a plain three.js viewer comes from the structure (incremental, GPU-ready, coarse-first
   deliveries), which three.js on the same data gets as well.
 
-The chunk format changed (v2, 16-bit positions), so the crates on crates.io (0.1.0) cannot read what this version
-sends; the next release will be 0.2.0 (when is the owner's decision).
+Since 0.2.0 the chunk format is v2 (16-bit positions): 0.1.0 clients and servers cannot read it ([CHANGELOG.md](CHANGELOG.md)).
 
 ## Why
 
@@ -89,7 +88,7 @@ PointBlitz appends what is new, swaps whole generations without a blank frame, a
 
 ## Install
 
-PointBlitz 0.1.0 is on [crates.io](https://crates.io/crates/pointblitz) (Rust 1.99 or newer).
+PointBlitz 0.2.0 is on [crates.io](https://crates.io/crates/pointblitz) (Rust 1.99 or newer); changes in [CHANGELOG.md](CHANGELOG.md).
 
 ```sh
 cargo add pointblitz                 # library: render core + PLY / chunk format (pointblitz-core, pointblitz-io)
@@ -151,7 +150,7 @@ Server video options and limits (decision 0042):
 | P1 | core + native renderer |
 | P2 | browser (wasm, WebGPU / WebGL2) |
 | P3 | server-side rendering with hardware video encoding |
-| P4 | comparison with three.js, hardware cost model on two machines, crates.io 0.1.0, latency work (results above) |
+| P4 | comparison with three.js, hardware cost model on two machines, crates.io 0.1.0 and 0.2.0, latency work (results above) |
 | P5 | meshes (terrain, buildings, textured surfaces), Python bindings |
 
 ## 한국어
@@ -168,10 +167,10 @@ PointBlitz 는 Rust + wgpu 로 만드는 점군 렌더러입니다. 같은 렌�
 - 재생 1 회에 받는 데이터: 180 → 135 MB(브라우저·native, 청크 좌표 16 비트).
 - **three.js 대비**(2026-10-09 세션 p48, 그때의 PointBlitz 빌드 — 거친 것 먼저 이전, [comparison-incremental.md](docs/bench/comparison-incremental.md)): 정밀 스냅샷이 화면에 SkyLens 식 three.js 162 ms, 같은 데이터 three.js 117 ms, PointBlitz 127 ms; 미리보기 36.0 / 30.0 / 29.3 ms; 렌더러 메모리 354 / 199 / 183 MB. "같은 데이터 three.js" 는 지표마다 두 올리기 방식 중 좋은 쪽입니다(결정 0048): 정밀 117 ms 는 (b) CPU 로 나눠 복사, 나머지는 (a) 청크 바이트 그대로.
 - **Rust·wgpu·wasm 자체의 몫**(같은 데이터·같은 그래픽 API, 같은 문서 §7): **WebGPU 에서는 PointBlitz 가 그리기 1.5 배 빠르고**(1.41 대 2.13 ms, 30 프레임마다 동기화, GPU 타임스탬프도 같은 방향) **메모리 1.57 배 적습니다**(183 대 287 MB). **WebGL2 에서는 three.js 가 그리기 약 3.2 배 빠릅니다**(1.56 대 5.00 ms). 5.00 ms 에는 PointBlitz 측정에만 있는 매 프레임 1 픽셀 복사(약 0.9 ms)가 들어 있어, 빼면 약 3.9 ms(약 2.5 배)입니다. 남은 차이의 대부분(약 1.8 ms)은 ANGLE 의 Direct3D 11 쪽입니다 — ANGLE 의 Vulkan 백엔드에서는 둘이 같습니다(§8). 일반 three.js 뷰어 대비 이득의 대부분은 구조(증분·GPU 형식·거친 것 먼저)에서 오며, 같은 데이터를 받는 three.js 도 그 이득을 얻습니다.
-- 청크 형식이 바뀌어(v2, 좌표 16 비트) crates.io 의 0.1.0 은 이 버전이 보내는 청크를 읽지 못합니다. 다음 배포는 0.2.0 입니다(시점은 소유자 결정).
+- 0.2.0 부터 청크 형식이 v2(좌표 16 비트)라 0.1.0 의 클라이언트·서버와 호환되지 않습니다([CHANGELOG.md](CHANGELOG.md)).
 - 다른 하드웨어 값은 실측이 아니라 비용 모델 추정입니다([cost-model.md](docs/bench/cost-model.md)).
 
-설치: `cargo add pointblitz`(라이브러리), `cargo install pointblitz-native`(창 뷰어), `cargo install pointblitz-server`(서버 영상, NVIDIA GPU·드라이버 필요, Windows·Linux) — crates.io 0.1.0, Rust 1.99 이상. 브라우저 모듈은 crates.io 가 아니라 저장소에서 `bash web/build.sh` 로 빌드합니다.
+설치: `cargo add pointblitz`(라이브러리), `cargo install pointblitz-native`(창 뷰어), `cargo install pointblitz-server`(서버 영상, NVIDIA GPU·드라이버 필요, Windows·Linux) — crates.io 0.2.0, Rust 1.99 이상. 브라우저 모듈은 crates.io 가 아니라 저장소에서 `bash web/build.sh` 로 빌드합니다.
 
 직접 돌려 보려면 위 [Try it](#try-it) 를 보세요 — 재생 서버를 띄운 뒤 브라우저·native·서버 영상 중 하나로 봅니다(드래그 회전, 휠 확대, 1–8 고정 시점). 서버 영상은 Windows 또는 Linux + NVIDIA GPU(드라이버의 NVENC)가 필요하고, `--phase-lock on` 은 클라이언트 하나·60 Hz 화면에서만 맞으며(기본 끔), 영상 페이지의 `?pacing=adaptive` 는 한 프레임을 쌓아 두어 프레임 간격을 고르게 합니다(지연 최대 한 프레임) — 60 Hz 가 아닌 화면을 위한 것이지만 그런 화면에서는 재 보지 않았습니다.
 

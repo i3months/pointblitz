@@ -13,7 +13,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 rust-version = "1.99"
 license = "MIT OR Apache-2.0"
@@ -22,8 +22,8 @@ readme = "README.md"
 homepage = "https://github.com/i3months/pointblitz"
 
 [workspace.dependencies]
-pointblitz-io = { path = "crates/io", version = "0.1.0" }
-pointblitz-core = { path = "crates/core", version = "0.1.0" }
+pointblitz-io = { path = "crates/io", version = "0.2.0" }
+pointblitz-core = { path = "crates/core", version = "0.2.0" }
 
 [workspace.lints.rust]
 unsafe_code = "deny"
