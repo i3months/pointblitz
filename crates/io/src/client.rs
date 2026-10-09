@@ -4,11 +4,13 @@
 //! Two threads, so a delivery in progress never delays the timestamp of the next event:
 //! - the event thread reads `/events` and stamps each snapshot the moment its line arrives;
 //! - the fetch thread takes snapshots in order and streams `/chunks/<seq>`, forwarding every chunk
-//!   as soon as its bytes are complete (decision 0026).
+//!   as soon as its bytes are complete (decision 0026) — or, with a local data directory (decision
+//!   0050), reads the snapshot's PLY there and converts it in this process, without HTTP.
 
 use crate::chunk::{FLAG_LAST_IN_GENERATION, HEADER_LEN, MAGIC, POINT_STRIDE, decode_header};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
+use std::path::PathBuf;
 use std::sync::mpsc;
 use std::time::Instant;
 
@@ -161,11 +163,104 @@ fn fetch(
 }
 
 /// Takes snapshots in arrival order and fetches each one; `have` tracks what the client holds.
-fn fetch_loop(host: &str, rx: mpsc::Receiver<Snapshot>, send: &impl Fn(Msg)) {
+/// Where the fetch thread gets a snapshot's chunks from.
+enum Source {
+    /// `/chunks/<seq>` of the replay server.
+    Http,
+    /// The PLY in a local directory, converted here (decision 0050).
+    Local(Local),
+}
+
+/// What converting locally needs from the replay server's manifest.
+struct Local {
+    dir: PathBuf,
+    steps: Vec<crate::convert::Step>,
+    files: Vec<String>,
+    appends: Vec<bool>,
+}
+
+impl Local {
+    fn load(host: &str, dir: PathBuf) -> std::io::Result<Self> {
+        let (_, mut r) = get(host, "/manifest.json")?;
+        let mut text = String::new();
+        r.read_to_string(&mut text)?;
+        let bad =
+            |what: &str| std::io::Error::new(std::io::ErrorKind::InvalidData, what.to_string());
+        let v: serde_json::Value = serde_json::from_str(&text)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+        let events = v["events"]
+            .as_array()
+            .ok_or_else(|| bad("manifest without events"))?;
+        let mut local = Self {
+            dir,
+            steps: Vec::new(),
+            files: Vec::new(),
+            appends: Vec::new(),
+        };
+        for e in events {
+            let snap = parse_snapshot(&e.to_string()).ok_or_else(|| bad("bad manifest event"))?;
+            local.steps.push(crate::convert::Step {
+                seq: snap.seq,
+                preview: snap.kind == "preview",
+                points: snap.points,
+            });
+            local.files.push(
+                e["file"]
+                    .as_str()
+                    .ok_or_else(|| bad("event without file"))?
+                    .to_string(),
+            );
+            // Older replay servers do not say; then every preview is delivered whole.
+            local.appends.push(e["appends"].as_bool().unwrap_or(false));
+        }
+        Ok(local)
+    }
+
+    /// Converts the delivery for `seq` (same plan as the replay server) and forwards its chunks as
+    /// each is encoded. Returns (delivery, generation, bytes, conversion started).
+    fn fetch(
+        &self,
+        seq: u32,
+        have: Option<(u32, usize)>,
+        send: &impl Fn(Msg),
+    ) -> std::io::Result<(String, u32, u64, Instant)> {
+        use crate::convert::{Conversion, Plan, plan};
+        let idx = self
+            .steps
+            .iter()
+            .position(|s| s.seq == seq)
+            .ok_or_else(|| std::io::Error::other(format!("snapshot {seq} not in the manifest")))?;
+        let (generation, skip, delivery) = match plan(&self.steps, idx, have, |k| self.appends[k]) {
+            Plan::Full { generation } => (generation, 0, "full"),
+            Plan::Delta { generation, skip } => (generation, skip, "delta"),
+        };
+        let started = Instant::now();
+        let c = Conversion::start(self.dir.join(&self.files[idx]), skip, generation);
+        let n = c.len().map_err(std::io::Error::other)?;
+        let mut bytes = 0u64;
+        for i in 0..n {
+            let chunk = c.take(i).map_err(std::io::Error::other)?;
+            bytes += chunk.len() as u64;
+            send(Msg::Chunk {
+                seq,
+                bytes: chunk,
+                last: i + 1 == n,
+                at: Instant::now(),
+            });
+        }
+        Ok((delivery.to_string(), generation, bytes, started))
+    }
+}
+
+fn fetch_loop(host: &str, source: &Source, rx: mpsc::Receiver<Snapshot>, send: &impl Fn(Msg)) {
     let mut have: Option<(u32, usize)> = None;
     for snap in rx {
         let fetch_start = Instant::now();
-        match fetch(host, snap.seq, have, send) {
+        let got = match source {
+            Source::Http => fetch(host, snap.seq, have, send),
+            Source::Local(local) => local.fetch(snap.seq, have, send),
+        };
+        match got {
             Ok((delivery, generation, bytes, headers_at)) => {
                 have = Some((generation, snap.points));
                 send(Msg::Delivered {
@@ -188,10 +283,45 @@ fn fetch_loop(host: &str, rx: mpsc::Receiver<Snapshot>, send: &impl Fn(Msg)) {
 
 /// Replay: follows `/events?speed=…`.
 pub fn spawn_replay(host: String, speed: f64, send: impl Fn(Msg) + Send + Sync + 'static) {
+    follow(host, None, speed, send);
+}
+
+/// Like [`spawn_replay`], but snapshots are read from `dir` (the replay server's data directory on
+/// this machine) and converted in this process instead of fetched over HTTP (decision 0050).
+pub fn spawn_replay_local(
+    host: String,
+    dir: PathBuf,
+    speed: f64,
+    send: impl Fn(Msg) + Send + Sync + 'static,
+) {
+    follow(host, Some(dir), speed, send);
+}
+
+fn source(host: &str, dir: Option<PathBuf>) -> std::io::Result<Source> {
+    Ok(match dir {
+        Some(dir) => Source::Local(Local::load(host, dir)?),
+        None => Source::Http,
+    })
+}
+
+fn follow(
+    host: String,
+    dir: Option<PathBuf>,
+    speed: f64,
+    send: impl Fn(Msg) + Send + Sync + 'static,
+) {
     let send = std::sync::Arc::new(send);
+    let src = match source(&host, dir) {
+        Ok(src) => src,
+        Err(e) => {
+            send(Msg::Error(format!("manifest: {e}")));
+            send(Msg::End);
+            return;
+        }
+    };
     let (tx, rx) = mpsc::channel::<Snapshot>();
     let (h2, s2) = (host.clone(), send.clone());
-    std::thread::spawn(move || fetch_loop(&h2, rx, &|m| s2(m)));
+    std::thread::spawn(move || fetch_loop(&h2, &src, rx, &|m| s2(m)));
     std::thread::spawn(move || {
         let run = || -> std::io::Result<()> {
             let (_, r) = get(&host, &format!("/events?speed={speed}"))?;
@@ -228,8 +358,18 @@ pub fn spawn_replay(host: String, speed: f64, send: impl Fn(Msg) + Send + Sync +
 
 /// Cold start: only the last snapshot of the manifest, as one full delivery.
 pub fn spawn_cold(host: String, send: impl Fn(Msg) + Send + Sync + 'static) {
+    cold(host, None, send);
+}
+
+/// Like [`spawn_cold`], reading the snapshot from `dir` (decision 0050).
+pub fn spawn_cold_local(host: String, dir: PathBuf, send: impl Fn(Msg) + Send + Sync + 'static) {
+    cold(host, Some(dir), send);
+}
+
+fn cold(host: String, dir: Option<PathBuf>, send: impl Fn(Msg) + Send + Sync + 'static) {
     std::thread::spawn(move || {
         let run = || -> std::io::Result<()> {
+            let src = source(&host, dir.clone())?;
             let (_, mut r) = get(&host, "/manifest.json")?;
             let mut text = String::new();
             r.read_to_string(&mut text)?;
@@ -247,7 +387,7 @@ pub fn spawn_cold(host: String, send: impl Fn(Msg) + Send + Sync + 'static) {
             let (tx, rx) = mpsc::channel();
             tx.send(last).ok();
             drop(tx);
-            fetch_loop(&host, rx, &send);
+            fetch_loop(&host, &src, rx, &send);
             Ok(())
         };
         if let Err(e) = run() {

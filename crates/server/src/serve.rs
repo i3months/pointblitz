@@ -5,8 +5,12 @@
 //! pointblitz-server serve --replay http://127.0.0.1:8700 [--port 8720] [--speed 60] [--qp 18]
 //!                         [--fps 60] [--viewpoints bench/viewpoints/flight-01.json] [--view overview_sw]
 //!                         [--exit-after-end <s>] [--wait-for-client] [--cold | --orbit] [--log <file>] [--wait-before-exit]
-//!                         [--phase-lock on|off] [--send poll]
+//!                         [--phase-lock on|off] [--send poll] [--data <dir>]
 //! ```
+//!
+//! `--data <dir>` (decision 0050): the replay server's data directory is on this machine — the
+//! snapshot PLYs are read there and converted in this process instead of fetched from `/chunks`.
+//! Announcements still come from the replay server's `/events`.
 //!
 //! Each frame is one binary WebSocket message: `u32 LE metadata length`, the metadata (UTF-8 JSON),
 //! then the H.264 access unit (Annex B). Metadata: `frame` (counter), `idr`, `t_ms` (server clock,
@@ -298,6 +302,7 @@ pub fn run(args: &[String]) -> Result<(), String> {
     // --log <file>: per input (received → applied tick → frame) and per late tick (where the time
     // went), as JSON lines — for the P3.4 analysis.
     let log_path = arg(args, "--log").map(str::to_string);
+    let data_dir = arg(args, "--data").map(std::path::PathBuf::from);
     // --wait-before-exit: when finished, print "finished" on stderr and wait for a line on stdin, so
     // a harness can read this process's OS peak memory while it exists (decision 0032).
     let wait_before_exit = args.iter().any(|a| a == "--wait-before-exit");
@@ -373,10 +378,11 @@ pub fn run(args: &[String]) -> Result<(), String> {
     let send = move |m| {
         let _ = msg_tx.lock().unwrap_or_else(|e| e.into_inner()).send(m);
     };
-    if cold {
-        client::spawn_cold(host, send);
-    } else {
-        client::spawn_replay(host, speed, send);
+    match (data_dir, cold) {
+        (Some(dir), true) => client::spawn_cold_local(host, dir, send),
+        (Some(dir), false) => client::spawn_replay_local(host, dir, speed, send),
+        (None, true) => client::spawn_cold(host, send),
+        (None, false) => client::spawn_replay(host, speed, send),
     }
 
     let t0 = Instant::now();

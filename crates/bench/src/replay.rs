@@ -13,6 +13,7 @@
 //!   (B2 baseline, decision 0048).
 //! - `GET /static/<path>` — files under the web root (baseline pages).
 
+use pointblitz_io::convert::Conversion;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::{Component, Path, PathBuf};
@@ -114,8 +115,18 @@ pub fn schedule(events: &[Event], speed: f64, start_at_first: bool) -> Vec<Durat
         .collect()
 }
 
-pub fn manifest_json(events: &[Event]) -> String {
-    let items: Vec<String> = events.iter().map(event_json).collect();
+/// `appends[k]`: snapshot k holds snapshot k − 1 unchanged at its start, so a client can plan a delta
+/// itself (a video server reading local data, decision 0050).
+pub fn manifest_json(events: &[Event], appends: &[bool]) -> String {
+    let items: Vec<String> = events
+        .iter()
+        .enumerate()
+        .map(|(k, e)| {
+            let j = event_json(e);
+            let a = appends.get(k).copied().unwrap_or(false);
+            format!("{},\"appends\":{a}}}", &j[..j.len() - 1])
+        })
+        .collect();
     format!("{{\"events\":[{}]}}", items.join(","))
 }
 
@@ -181,6 +192,68 @@ struct Server {
     events: Vec<Event>,
     /// `appends[k]`: snapshot k holds snapshot k − 1 unchanged at its start (crate::chunks).
     appends: Vec<bool>,
+    /// Deliveries converted when their snapshot was announced (decision 0050): (seq, generation,
+    /// skip, conversion), most recently used last. Only the newest snapshots are kept.
+    conversions: std::sync::Mutex<Vec<Held>>,
+}
+
+/// A kept conversion: (seq, generation, skip, conversion).
+type Held = (u32, u32, usize, Arc<Conversion>);
+
+/// Snapshots whose conversions stay in memory (decision 0050: the current one and the one before).
+const KEPT_SNAPSHOTS: usize = 2;
+
+/// The conversion for snapshot `idx` as (generation, skip): kept in memory, or started now. The
+/// second value says which ("ready", "running" or "new").
+fn conversion(
+    server: &Server,
+    idx: usize,
+    generation: u32,
+    skip: usize,
+) -> (Arc<Conversion>, &'static str) {
+    let seq = server.events[idx].seq;
+    let mut held = server.conversions.lock().unwrap_or_else(|e| e.into_inner());
+    let found = held
+        .iter()
+        .position(|(s, g, k, _)| (*s, *g, *k) == (seq, generation, skip));
+    let (c, how) = match found {
+        Some(i) => {
+            let (.., c) = held.remove(i);
+            let how = if c.times().1.is_some() {
+                "ready"
+            } else {
+                "running"
+            };
+            (c, how)
+        }
+        None => {
+            let path = server.data.join(&server.events[idx].file);
+            (Conversion::start(path, skip, generation), "new")
+        }
+    };
+    held.push((seq, generation, skip, Arc::clone(&c)));
+    let mut recent: Vec<u32> = Vec::new();
+    for (s, ..) in held.iter().rev() {
+        if !recent.contains(s) {
+            recent.push(*s);
+        }
+    }
+    recent.truncate(KEPT_SNAPSHOTS);
+    held.retain(|(s, ..)| recent.contains(s));
+    (c, how)
+}
+
+/// Starts converting what a client following the announcements will ask for: the full delivery
+/// and, when the snapshot appends to the previous one, the delta (decision 0050). Does not wait.
+fn prepare(server: &Server, idx: usize) {
+    use crate::chunks::{Plan, plan, steps};
+    let seq = server.events[idx].seq;
+    conversion(server, idx, seq, 0);
+    let appends = |k: usize| server.appends[k];
+    let have = pointblitz_io::convert::expected_have(&steps(&server.events), idx, appends);
+    if let Plan::Delta { generation, skip } = plan(&server.events, idx, have, appends) {
+        conversion(server, idx, generation, skip);
+    }
 }
 
 pub fn run(args: &[String]) -> Result<(), String> {
@@ -220,6 +293,7 @@ pub fn run(args: &[String]) -> Result<(), String> {
         web,
         events,
         appends,
+        conversions: std::sync::Mutex::new(Vec::new()),
     });
     let listener =
         TcpListener::bind(("127.0.0.1", port)).map_err(|e| format!("bind {port}: {e}"))?;
@@ -262,7 +336,7 @@ fn handle(server: &Server, mut stream: TcpStream) -> std::io::Result<()> {
             &mut stream,
             200,
             "application/json",
-            manifest_json(&server.events).as_bytes(),
+            manifest_json(&server.events, &server.appends).as_bytes(),
         ),
         "/events" => {
             let speed = q("speed").and_then(|s| s.parse().ok()).unwrap_or(1.0f64);
@@ -333,6 +407,11 @@ fn stream_events(
         if let Some(wait) = at.checked_sub(t0.elapsed()) {
             std::thread::sleep(wait);
         }
+        // Conversion starts as the snapshot is announced, without delaying the announcement
+        // (decision 0050: it stays inside the client's measured window).
+        if let Some(idx) = server.events.iter().position(|x| x.seq == e.seq) {
+            prepare(server, idx);
+        }
         let json = event_json(e);
         write!(stream, "event: snapshot\ndata: {json}\n\n")?;
         stream.flush()?;
@@ -345,82 +424,43 @@ fn stream_events(
     stream.flush()
 }
 
-/// Converts snapshot `idx` and streams its chunks (crate::chunks). The body has no length: the
-/// client reads chunks until the one flagged last, and the connection closes.
+/// Streams snapshot `idx` as chunks (crate::chunks) from its in-memory conversion, waiting for
+/// chunks still being encoded. The body has no length: the client reads chunks until the one flagged
+/// last, and the connection closes.
 fn serve_chunks(
     server: &Server,
     stream: &mut TcpStream,
     idx: usize,
     have: Option<(u32, usize)>,
 ) -> std::io::Result<()> {
-    use crate::chunks::{MAX_POINTS, Plan, plan};
-    use pointblitz_io::chunk::{
-        FLAG_LAST_IN_GENERATION, chunk_count, chunk_records, encode_records,
-    };
-    use std::io::{Seek, SeekFrom};
-    let invalid =
-        |e: pointblitz_io::PlyError| std::io::Error::new(std::io::ErrorKind::InvalidData, e);
+    use crate::chunks::{Plan, plan};
     let t0 = Instant::now();
     let p = plan(&server.events, idx, have, |k| server.appends[k]);
     let (generation, skip, kind) = match p {
         Plan::Full { generation } => (generation, 0, "full"),
         Plan::Delta { generation, skip } => (generation, skip, "delta"),
     };
-    // Read the header, then only the records this delivery sends (P1.5: a delta used to read the
-    // whole file).
-    let mut file = std::fs::File::open(server.data.join(&server.events[idx].file))?;
-    let mut head = Vec::new();
-    (&mut file).take(64 * 1024).read_to_end(&mut head)?;
-    let h = pointblitz_io::parse_header(&head).map_err(invalid)?;
-    let skip = skip.min(h.vertex_count);
-    let mut records = vec![0u8; (h.vertex_count - skip) * h.stride];
-    file.seek(SeekFrom::Start((h.header_len + skip * h.stride) as u64))?;
-    file.read_exact(&mut records)?;
-    let read_ms = t0.elapsed().as_secs_f64() * 1e3;
+    let (c, how) = conversion(server, idx, generation, skip);
     write!(
         stream,
         "HTTP/1.1 200 OK\r\nContent-Type: application/x-pointblitz-chunks\r\n\
          X-PB-Delivery: {kind}\r\nX-PB-Generation: {generation}\r\n\
          Cache-Control: no-store\r\nConnection: close\r\n\r\n"
     )?;
-    // Chunks are encoded in parallel (up to one thread per core) and written in order as soon as
-    // the next one is ready, so the first chunk still leaves early (P1.5).
-    let chunks = chunk_count(h.vertex_count - skip, MAX_POINTS);
-    let workers = std::thread::available_parallelism().map_or(4, |n| n.get());
+    let chunks = c.len().map_err(std::io::Error::other)?;
     let mut sent = 0u64;
-    std::thread::scope(|s| -> std::io::Result<()> {
-        let encode = |i: usize| {
-            let flags = if i + 1 == chunks {
-                FLAG_LAST_IN_GENERATION
-            } else {
-                0
-            };
-            let part = chunk_records(&h, &records, MAX_POINTS, i);
-            encode_records(&h, part, generation, i as u32, flags)
-        };
-        let mut running = std::collections::VecDeque::new();
-        let mut next = 0;
-        for _ in 0..chunks {
-            while running.len() < workers && next < chunks {
-                let i = next;
-                running.push_back(s.spawn(move || encode(i)));
-                next += 1;
-            }
-            let c = running
-                .pop_front()
-                .expect("one encoder per chunk")
-                .join()
-                .map_err(|_| std::io::Error::other("encoder panicked"))?;
-            stream.write_all(&c)?;
-            sent += c.len() as u64;
-        }
-        Ok(())
-    })?;
+    for i in 0..chunks {
+        let bytes = c.chunk(i).map_err(std::io::Error::other)?;
+        stream.write_all(&bytes)?;
+        sent += bytes.len() as u64;
+    }
     stream.flush()?;
+    let (read_ms, done_ms) = c.times();
     eprintln!(
         "chunks: seq {} {kind} gen {generation} skip {skip} -> {chunks} chunks, {sent} B, \
-         read {read_ms:.1} ms, total {:.1} ms",
+         conversion {how} (read {read_ms:.1} ms, encoded {:.1} ms after its start), total {:.1} ms",
         server.events[idx].seq,
+        done_ms.unwrap_or(f64::NAN),
         t0.elapsed().as_secs_f64() * 1e3
     );
     Ok(())
@@ -508,6 +548,71 @@ fn respond(stream: &mut TcpStream, code: u16, ty: &str, body: &[u8]) -> std::io:
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn announced_conversions_match_converting_on_request() {
+        // Two snapshots, the second a preview that appends to the first (decision 0050).
+        let ply = |n: u8| {
+            let mut b = format!(
+                "ply\nformat binary_little_endian 1.0\nelement vertex {n}\nproperty float x\n\
+                 property float y\nproperty float z\nproperty uchar red\nproperty uchar green\n\
+                 property uchar blue\nend_header\n"
+            )
+            .into_bytes();
+            for i in 0..n {
+                for v in [f32::from(i), 0.5, -1.0] {
+                    b.extend_from_slice(&v.to_le_bytes());
+                }
+                b.extend_from_slice(&[i, i, i]);
+            }
+            b
+        };
+        let dir = std::env::temp_dir().join(format!("pb-announce-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("event_01_0001.0s_refined_0.ply"), ply(3)).unwrap();
+        std::fs::write(dir.join("event_02_0002.0s_preview_0.ply"), ply(5)).unwrap();
+        let events = scan(&dir).unwrap();
+        let server = Server {
+            data: dir.clone(),
+            web: None,
+            events,
+            appends: vec![false, true],
+            conversions: std::sync::Mutex::new(Vec::new()),
+        };
+        prepare(&server, 0);
+        prepare(&server, 1);
+        // Full of 1, full of 2 and the delta 1 → 2 were started at the announcements.
+        let held = |s: &Server| s.conversions.lock().unwrap().len();
+        assert_eq!(held(&server), 3);
+        for (idx, generation, skip) in [(0, 1, 0), (1, 2, 0), (1, 1, 3)] {
+            let (c, how) = conversion(&server, idx, generation, skip);
+            assert_ne!(how, "new");
+            let fresh = Conversion::start(dir.join(&server.events[idx].file), skip, generation);
+            assert_eq!(c.len(), fresh.len());
+            for i in 0..c.len().unwrap() {
+                assert_eq!(c.chunk(i), fresh.chunk(i));
+            }
+        }
+        // A third snapshot's conversions push the oldest snapshot out.
+        std::fs::write(dir.join("event_03_0003.0s_refined_1.ply"), ply(4)).unwrap();
+        let mut events = scan(&dir).unwrap();
+        events.sort_by_key(|e| e.seq);
+        let server = Server {
+            events,
+            appends: vec![false, true, false],
+            ..server
+        };
+        prepare(&server, 2);
+        let seqs: Vec<u32> = server
+            .conversions
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|e| e.0)
+            .collect();
+        assert!(!seqs.contains(&1) && seqs.contains(&2) && seqs.contains(&3));
+        std::fs::remove_dir_all(&dir).ok();
+    }
 
     #[test]
     fn ply_parts_splits_header_and_tail_records() {
@@ -607,7 +712,7 @@ mod tests {
 
     #[test]
     fn manifest_lists_events_in_order() {
-        let json = manifest_json(&[ev(1, 1.0), ev(2, 2.5)]);
+        let json = manifest_json(&[ev(1, 1.0), ev(2, 2.5)], &[false, true]);
         assert!(json.starts_with("{\"events\":[{\"seq\":1,"));
         assert!(json.contains("\"url\":\"/data/e2\""));
     }
