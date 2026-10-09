@@ -27,7 +27,7 @@ mod serve;
 
 const USAGE: &str = "usage:
   pointblitz-server encode-test --ply <file> --viewpoints <json> --out <dir> [--qp 18,23,28]
-  pointblitz-server serve --replay <url> [--port 8720] [--speed 60] [--qp 18] [--fps 60] [--exit-after-end <s>] [--wait-for-client]
+  pointblitz-server serve --replay <url> [--port 8720] [--speed 60] [--qp 18] [--fps 60] [--exit-after-end <s>] [--wait-for-client] [--data <dir>]
   pointblitz-server probe [--url ws://127.0.0.1:8720] [--expect-snapshots 14] [--max-seconds 120]";
 
 fn main() -> std::process::ExitCode {

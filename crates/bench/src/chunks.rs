@@ -1,8 +1,9 @@
 //! Chunk delivery for PointBlitz clients (SPEC §3.3, decision 0026).
 //!
-//! `GET /chunks/<seq>?have=<generation>.<points>` converts snapshot `seq` to chunks on request and
-//! streams them as they are encoded. The conversion runs inside the client's measured window
-//! (event received → presented), the same place three.js pays for parsing.
+//! `GET /chunks/<seq>?have=<generation>.<points>` streams snapshot `seq` as chunks. The conversion
+//! starts when the snapshot is announced and is kept in memory (decision 0050; before, on every
+//! request — 0026); it still runs inside the client's measured window (event received → presented),
+//! the same place three.js pays for parsing.
 //!
 //! - **Full delivery**: every point, as a new generation numbered by the snapshot's `seq`.
 //! - **Delta delivery**: only the points after the client's `points`, appended to its generation.
@@ -13,20 +14,19 @@
 //! misses a snapshot) simply gets a full delivery.
 
 use crate::replay::{Event, Kind};
+use pointblitz_io::convert::Step;
+pub use pointblitz_io::convert::{Plan, parse_have};
 
-/// Largest chunk (decision 0022).
-pub const MAX_POINTS: usize = 256 * 1024;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Plan {
-    Full { generation: u32 },
-    Delta { generation: u32, skip: usize },
-}
-
-/// Parses `have=<generation>.<points>`.
-pub fn parse_have(v: &str) -> Option<(u32, usize)> {
-    let (g, n) = v.split_once('.')?;
-    Some((g.parse().ok()?, n.parse().ok()?))
+/// The events as the shared delivery rules see them (`pointblitz_io::convert`, decision 0050).
+pub fn steps(events: &[Event]) -> Vec<Step> {
+    events
+        .iter()
+        .map(|e| Step {
+            seq: e.seq,
+            preview: e.kind == Kind::Preview,
+            points: e.points,
+        })
+        .collect()
 }
 
 /// Chooses the delivery for `events[idx]`. `appends(k)` says whether snapshot `k` (k ≥ 1) holds
@@ -35,33 +35,9 @@ pub fn plan(
     events: &[Event],
     idx: usize,
     have: Option<(u32, usize)>,
-    mut appends: impl FnMut(usize) -> bool,
+    appends: impl FnMut(usize) -> bool,
 ) -> Plan {
-    let e = &events[idx];
-    let full = Plan::Full { generation: e.seq };
-    let Some((generation, points)) = have else {
-        return full;
-    };
-    if e.kind != Kind::Preview || idx == 0 || events[idx - 1].points != points {
-        return full;
-    }
-    // The client's generation must have started at a snapshot from which every later snapshot up
-    // to this one only appended points.
-    let Some(start) = events.iter().position(|x| x.seq == generation) else {
-        return full;
-    };
-    if start >= idx {
-        return full;
-    }
-    let chain = (start + 1..=idx).all(|k| events[k].kind == Kind::Preview && appends(k));
-    if chain {
-        Plan::Delta {
-            generation,
-            skip: points,
-        }
-    } else {
-        full
-    }
+    pointblitz_io::convert::plan(&steps(events), idx, have, appends)
 }
 
 #[cfg(test)]

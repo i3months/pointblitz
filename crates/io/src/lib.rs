@@ -13,6 +13,7 @@
 pub mod chunk;
 #[cfg(feature = "client")]
 pub mod client;
+pub mod convert;
 pub mod ply;
 pub mod stream;
 

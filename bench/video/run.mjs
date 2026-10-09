@@ -3,7 +3,7 @@
 // usage: node bench/video/run.mjs --server http://127.0.0.1:<replay> --port <serve port>
 //                                 --scenario replay|cold|orbit [--speed 60] [--metrics <file.jsonl>]
 //                                 [--exe target/release/pointblitz-server.exe] [--log <server log>]
-//                                 [--raw <file.json>] [--pacing buffer|immediate|adaptive (decisions 0039, 0040)] [--phase-lock on|off (decision 0042)]
+//                                 [--raw <file.json>] [--pacing buffer|immediate|adaptive (decisions 0039, 0040)] [--phase-lock on|off (decision 0042)] [--data <ply dir> (decision 0050)]
 //                                 [--timeout <s, default 300: fail a client that never finishes>]
 // Run from the repository root (serve reads bench/viewpoints/flight-01.json).
 //
@@ -37,6 +37,7 @@ else serveArgs.push('--exit-after-end', '2');
 if (args['phase-lock']) serveArgs.push('--phase-lock', args['phase-lock']);
 if (args.fps) serveArgs.push('--fps', String(args.fps)); // frame rate (decision 0045); the server default is 60
 if (args.send) serveArgs.push('--send', args.send); // A/B of the send path (decision 0042)
+if (args.data) serveArgs.push('--data', args.data); // read the snapshots locally instead of over HTTP (decision 0050)
 
 const serve = spawn(exe, serveArgs, { stdio: ['pipe', 'ignore', 'pipe'] });
 let serveErr = '';
