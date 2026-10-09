@@ -3,7 +3,8 @@
 # session (PR #10 review — sessions drift, so both implementations must share one).
 #
 # usage: bash bench/suite.sh <ply dir> <out dir>        (run from the repository root)
-# env:   COLD=5 ORBIT=5 X60=3 X1=0 PORT=8783 IMPLS="three native web webs webgl video" B1_UPLOAD=a ORBIT_BATCHES="1"
+# env:   COLD=5 ORBIT=5 X60=3 X1=0 PORT=8783 IMPLS="three native web webs webgl video" B1_UPLOAD=a ORBIT_BATCHES="1" VIDEO_DATA=0
+#        VIDEO_DATA=1 = the video server reads the snapshots from <ply dir> on this machine (serve --data)
 #        ORBIT_BATCHES="30 1" = each orbit run once per batch size (decision 0049), batch 30 named <impl>-orbitb30-<i>
 #        three-b1 / three-b1-webgpu / three-b2 = incremental three.js baselines (decision 0048),
 #        three-b1a / three-b1b = B1 with upload (a) / (b), for the upload smoke
@@ -68,6 +69,8 @@ run() { # impl scenario speed index [batch]
     native) cmd=(node bench/native/run.mjs --server "$URL" --scenario "$scen" --speed "$speed" --exe "target/release/pointblitz-native$EXT" --metrics "$ABS_OUT/$name.jsonl") ;;
     video) cmd=(node bench/video/run.mjs --server "$URL" --port "$VIDEO_PORT" --scenario "$scen" --speed "$speed" --exe "target/release/pb-suite-serve$EXT" --metrics "$ABS_OUT/$name.jsonl" --log "$ABS_OUT/$name.server.log") ;;
   esac
+  # VIDEO_DATA=1: the video server reads the snapshots locally (decision 0050, P4.18).
+  if [ "$impl" = video ] && [ "${VIDEO_DATA:-0}" = 1 ]; then cmd+=(--data "$DATA"); fi
   # orbit with batch > 1 (decision 0049): N frames per sync; browser pages take it as a page parameter.
   if [ "$batch" -gt 1 ]; then
     local k q=-1
