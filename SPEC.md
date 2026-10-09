@@ -107,7 +107,7 @@ PLY / 청크 ────► │ chunk store(append·replace·세대) → GPU �
 | 실행 위치 | 서버가 하는 일 | 클라이언트가 받는 것 |
 |---|---|---|
 | 기존 방식 | PLY 정적 서빙 | 이벤트마다 PLY 전체 |
-| 브라우저 · 네이티브 | PLY → GPU 레이아웃 청크 변환. preview 는 새 점만, refined 는 새 세대 전체 | GPU 버퍼에 그대로 복사할 수 있는 무압축 청크([0008](docs/decisions/0008-gpu-ready-uncompressed-chunks.md)) |
+| 브라우저 · 네이티브 | PLY → GPU 레이아웃 청크 변환. preview 는 새 점만, refined 는 새 세대 전체(거친 것 먼저, [0051](docs/decisions/0051-fewer-bytes-coarse-first.md)) | GPU 가 해석 없이 그대로 쓰는 청크([0008](docs/decisions/0008-gpu-ready-uncompressed-chunks.md)), 좌표는 청크 경계 상자 기준 16 비트([0051](docs/decisions/0051-fewer-bytes-coarse-first.md)) |
 | 서버 영상 | 서버 GPU 렌더 → 하드웨어 인코딩 | H.264 영상 프레임(WebSocket + WebCodecs), 입력은 역방향 전송([0010](docs/decisions/0010-server-video-transport.md)) |
 
 ### 3.4 좌표 규약
@@ -156,7 +156,8 @@ skylens 는 skyrecon 점군을 아직 그리지 않으므로, skylens 의 three.
 | 지표 | 정의 | 단위 |
 |---|---|---|
 | `bytes_total` / `bytes_event` | 클라이언트가 받은 바이트(전체 / 이벤트별) | B |
-| `event_latency` | 이벤트 도착 → 그 이벤트의 점이 모두 보이는 첫 프레임 | ms |
+| `event_latency` | 이벤트 도착 → 그 이벤트의 점이 모두 보이는 첫 프레임("완전 반영") | ms |
+| `event_first_latency` | 이벤트 도착 → 그 이벤트의 새 세대가 처음 보이는 프레임("첫 반영"). 정밀: 거친 첫 1/8 이 올라간 뒤([0051](docs/decisions/0051-fewer-bytes-coarse-first.md)). 미리보기: `event_latency` 와 같다 | ms |
 | `first_frame` | 접속 → 첫 점이 그려진 프레임(`cold`) | ms |
 | `frame_time` | p50 / p95 / p99, CPU·GPU 따로 | ms |
 | `main_thread_block` | 50 ms 넘는 메인 스레드 작업의 수와 합(브라우저) | 개, ms |
@@ -220,6 +221,7 @@ PointBlitz 를 재기 전에 정했다. 근거·이유: [docs/ops/reviews/p0-7-t
 | `event_latency` preview p50 | ≤ 50 ms | native · browser | 466.5 ms |
 | `event_latency` refined p50 | ≤ 200 ms | native · browser | 609.1 ms |
 | cold 마지막 스냅샷 `event_latency` | ≤ 300 ms | native · browser | 882.2 ms |
+| `event_first_latency` refined p50(첫 반영, 2026-10-09 추가) | ≤ 50 ms | browser(WebGPU) | — |
 | `main_thread_block` | 0 회(`replay` ×60 · `cold`) | browser | 16 회 · 6,305 ms |
 | `mem_cpu` 최대(`replay` ×60) | **기록만**(2026-10-08 소유자: 메모리 제약 없음) — 이전 감독 값 ≤ 300 MB | browser 렌더러 / native 프로세스, OS 최대 commit(결정 0032) | 860.7 MB(이전 방법) |
 | `frame_time_total` p50 / p95 / p99(`orbit`, 2.5 M 점) | 각각 기준 방식 이하 | native · browser | **1.7 / 1.9 / 2.0 ms**(2026-10-08 재측정 2: C1–C4 준수, 밉맵 끔 — 결정 0025·0040·0041). 이전 2.8 / 3.8 / 6.0 ms(P0.6: C3 범위 밖 11/14, C4 미상) |
@@ -238,6 +240,7 @@ PointBlitz 를 재기 전에 정했다. 근거·이유: [docs/ops/reviews/p0-7-t
 |---|---|---|
 | `event_latency` preview p50 | ≤ 80 ms | 다른 대상의 목표 + 인코딩·전송·디코딩·다음 영상 프레임 |
 | `event_latency` refined p50 | ≤ 250 ms | |
+| `event_first_latency` refined p50(첫 반영, 2026-10-09 추가) | ≤ 50 ms | 서버 영상이 거친 첫 1/8 로 새 세대를 그린 프레임이 화면에 |
 | cold(첫 영상 프레임에 마지막 스냅샷이 보일 때까지) | ≤ 350 ms | |
 | 입력 → 표시 지연 p50 / p95 | ≤ 50 / 80 ms | 입력 번호가 돌아온 영상 프레임이 화면에 그려질 때까지 |
 | 영상 프레임 빠짐(orbit) | ≤ 1 % | **정의**: 클라이언트 화면의 60 Hz 주기 중 새 영상 프레임이 나오지 못한 주기의 비율(서버가 못 만든 것·전송·디코딩이 늦은 것을 모두 포함하는 끝에서 끝까지 값) |
@@ -278,3 +281,4 @@ PointBlitz 를 재기 전에 정했다. 근거·이유: [docs/ops/reviews/p0-7-t
 | 2026-10-08 | §7.1 `mem_cpu` 를 목표에서 기록만으로(이전 목표 ≤ 300 MB 는 표에 남김). 이유: 메모리는 대역폭처럼 제약이 아니다. INTENT 원칙 2 에 메모리 추가. 참고: P1.5 native `mem_cpu` 미달(348.6 MB, 이전 방법)과 결정 0032 의 재측정 필요가 알려진 뒤의 변경이다 | 프로젝트 소유자(채팅) |
 | 2026-10-08 | §7.1 서버 영상(P3) 목표 추가(제안 그대로, 화질은 native 캡처 대비), 프레임 빠짐 정의 | 프로젝트 소유자(채팅) |
 | 2026-10-08 | §7.1 `frame_time_total` 기준값 정정 2.8 / 3.8 / 6.0 → 1.7 / 1.9 / 2.0 ms(기준 방식 재측정 2, C1–C4 준수, 밉맵 끔). 이유: 기준 측정 유효성 정정 — P0.6 원 측정은 C3 범위 밖 11/14·C4 미상. 판정 이력은 문서에 보존(docs/bench/baseline-three.md, validity-audit.md), 판정은 P4.6 C1–C4 전체 비교에서 새 기준으로. §7.1 에 판정 유효성(C1–C4) 문구 추가 | 감독(소유자 위임 2026-10-08) — 기준 측정 유효성 정정 |
+| 2026-10-09 | §6.2 `event_first_latency`("첫 반영") 추가, `event_latency` 는 "완전 반영" 으로 이름만 붙임(정의 그대로). §7.1 목표 두 줄 추가: browser(WebGPU)·서버 영상 정밀 첫 반영 p50 ≤ 50 ms. §3.3 청크를 좌표 16 비트·거친 것 먼저로(결정 0051) | 소유자(③·④ 허용, 채팅) · 감독(목표 값, 측정 전 고정) |
