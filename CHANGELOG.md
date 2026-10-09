@@ -21,7 +21,8 @@ All six crates (`pointblitz`, `pointblitz-core`, `pointblitz-io`, `pointblitz-na
   replay server and the video server; `/manifest.json` has an `appends` field.
 - `pointblitz-core`: `GpuTimer` and `Renderer::set_timestamp_writes` for GPU timestamps (decision 0049).
 - Measured on one PC: a new refined snapshot is first on screen in about 35–43 ms in the browser (WebGPU) and about
-  49 ms as server video, about 3× sooner than 0.1.0's build ([README](README.md), `docs/bench/`).
+  49 ms as server video, about 3× sooner than before the latency work (builds 0404a79 … ff05817, the same
+  delivery path as 0.1.0) ([README](README.md), `docs/bench/`).
 
 ## 0.1.0 — 2026-10-08
 
