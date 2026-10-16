@@ -21,11 +21,22 @@ const BLACK: FrameStyle = FrameStyle {
     fog: None,
 };
 
-fn gpu() -> Option<(wgpu::Device, wgpu::Queue)> {
+/// One GPU test at a time, as in `tests/slots.rs`: many devices created and polled at once from
+/// parallel test threads sometimes never return on the NVIDIA Vulkan driver (V100, Linux).
+static GPU: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+type Gpu = (
+    wgpu::Device,
+    wgpu::Queue,
+    std::sync::MutexGuard<'static, ()>,
+);
+
+fn gpu() -> Option<Gpu> {
+    let guard = GPU.lock().unwrap_or_else(|e| e.into_inner());
     match pointblitz_core::headless::device() {
         Some((d, q, info)) => {
             eprintln!("adapter: {} ({:?})", info.name, info.backend);
-            Some((d, q))
+            Some((d, q, guard))
         }
         None => {
             eprintln!("no GPU adapter, skipped");
@@ -90,7 +101,9 @@ fn scene_of(device: &wgpu::Device, points: &[([f32; 3], [u8; 3])]) -> Scene {
 
 #[test]
 fn begin_pass_clears_to_the_style_colour() {
-    let Some((device, queue)) = gpu() else { return };
+    let Some((device, queue, _gpu)) = gpu() else {
+        return;
+    };
     let mut hl = Headless::new(&device, [W, H]);
     let img = hl.capture_with(&device, &queue, |enc, color, depth| {
         drop(begin_pass(enc, color, depth, &NAVY));
@@ -101,7 +114,9 @@ fn begin_pass_clears_to_the_style_colour() {
 
 #[test]
 fn unlit_mesh_keeps_its_colour_and_culls_back_faces() {
-    let Some((device, queue)) = gpu() else { return };
+    let Some((device, queue, _gpu)) = gpu() else {
+        return;
+    };
     let cam = looking_north();
     let mut meshes = MeshRenderer::new(&device, CAPTURE_FORMAT);
     meshes.upsert(
@@ -133,7 +148,9 @@ fn unlit_mesh_keeps_its_colour_and_culls_back_faces() {
 
 #[test]
 fn fog_reaches_its_colour_past_far() {
-    let Some((device, queue)) = gpu() else { return };
+    let Some((device, queue, _gpu)) = gpu() else {
+        return;
+    };
     let cam = looking_north();
     let fog = Fog {
         color: [1.0, 0.0, 1.0],
@@ -165,7 +182,9 @@ fn fog_reaches_its_colour_past_far() {
 
 #[test]
 fn lambert_matches_three_js_numbers() {
-    let Some((device, queue)) = gpu() else { return };
+    let Some((device, queue, _gpu)) = gpu() else {
+        return;
+    };
     let cam = looking_north();
     // Wall normal is horizontal: hemisphere gives mix(ground, sky, 0.5) = 0.5 linear with a white
     // sky of intensity pi and a black ground; 0.5 linear is sRGB 188.
@@ -209,7 +228,9 @@ fn lambert_matches_three_js_numbers() {
 
 #[test]
 fn textures_are_sampled_with_their_uvs() {
-    let Some((device, queue)) = gpu() else { return };
+    let Some((device, queue, _gpu)) = gpu() else {
+        return;
+    };
     let cam = looking_north();
     let texture = TextureImage {
         width: 2,
@@ -241,7 +262,9 @@ fn textures_are_sampled_with_their_uvs() {
 
 #[test]
 fn meshes_points_and_lines_share_one_depth_buffer() {
-    let Some((device, queue)) = gpu() else { return };
+    let Some((device, queue, _gpu)) = gpu() else {
+        return;
+    };
     let cam = looking_north();
     let mut meshes = MeshRenderer::new(&device, CAPTURE_FORMAT);
     meshes.upsert(
@@ -312,7 +335,9 @@ fn meshes_points_and_lines_share_one_depth_buffer() {
 
 #[test]
 fn per_scene_alpha_fades_points_and_several_scenes_share_a_frame() {
-    let Some((device, queue)) = gpu() else { return };
+    let Some((device, queue, _gpu)) = gpu() else {
+        return;
+    };
     let cam = looking_north();
     let a = [0.0f32, 0.0, 0.0];
     let b = [1.0f32, 0.0, 0.0];
@@ -334,7 +359,9 @@ fn per_scene_alpha_fades_points_and_several_scenes_share_a_frame() {
 
 #[test]
 fn metre_points_shrink_with_distance() {
-    let Some((device, queue)) = gpu() else { return };
+    let Some((device, queue, _gpu)) = gpu() else {
+        return;
+    };
     // Focal length is about 68.6 px (50 degrees over 64 px): 0.3 m is ~6.9 px at 3 m, ~2 px at 10 m.
     let near_p = [-1.0f32, -7.0, 0.0];
     let far_p = [1.0f32, 0.0, 0.0];
@@ -362,7 +389,9 @@ fn metre_points_shrink_with_distance() {
 
 #[test]
 fn additive_meshes_add_up() {
-    let Some((device, queue)) = gpu() else { return };
+    let Some((device, queue, _gpu)) = gpu() else {
+        return;
+    };
     let cam = looking_north();
     let mut meshes = MeshRenderer::new(&device, CAPTURE_FORMAT);
     let grey = unlit([0.25, 0.25, 0.25, 1.0], Blend::Additive);

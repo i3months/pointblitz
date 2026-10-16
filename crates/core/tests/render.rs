@@ -8,11 +8,22 @@ use pointblitz_io::chunk::{FLAG_LAST_IN_GENERATION, encode};
 const W: u32 = 320;
 const H: u32 = 180;
 
-fn gpu() -> Option<(wgpu::Device, wgpu::Queue)> {
+/// One GPU test at a time, as in `tests/slots.rs`: many devices created and polled at once from
+/// parallel test threads sometimes never return on the NVIDIA Vulkan driver (V100, Linux).
+static GPU: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+type Gpu = (
+    wgpu::Device,
+    wgpu::Queue,
+    std::sync::MutexGuard<'static, ()>,
+);
+
+fn gpu() -> Option<Gpu> {
+    let guard = GPU.lock().unwrap_or_else(|e| e.into_inner());
     match pointblitz_core::headless::device() {
         Some((d, q, info)) => {
             eprintln!("adapter: {} ({:?})", info.name, info.backend);
-            Some((d, q))
+            Some((d, q, guard))
         }
         None => {
             eprintln!("no GPU adapter — skipped");
@@ -45,7 +56,9 @@ fn looking_north() -> Camera {
 
 #[test]
 fn a_point_lands_where_the_cpu_projection_says() {
-    let Some((device, queue)) = gpu() else { return };
+    let Some((device, queue, _gpu)) = gpu() else {
+        return;
+    };
     let mut scene = Scene::new();
     let p = [1.5f32, 0.0, -0.8];
     scene
@@ -67,7 +80,9 @@ fn a_point_lands_where_the_cpu_projection_says() {
 
 #[test]
 fn nearer_point_wins_without_sorting() {
-    let Some((device, queue)) = gpu() else { return };
+    let Some((device, queue, _gpu)) = gpu() else {
+        return;
+    };
     let mut scene = Scene::new();
     // Far red first, near green second, then the reverse order in another chunk: depth decides.
     let far = pt([0.0, 5.0, 0.0], [255, 0, 0]);
@@ -89,7 +104,9 @@ fn nearer_point_wins_without_sorting() {
 
 #[test]
 fn generations_swap_only_when_complete() {
-    let Some((device, queue)) = gpu() else { return };
+    let Some((device, queue, _gpu)) = gpu() else {
+        return;
+    };
     let mut scene = Scene::new();
     let cam = looking_north();
     let mut hl = Headless::new(&device, [W, H]);
@@ -142,7 +159,9 @@ fn generations_swap_only_when_complete() {
 
 #[test]
 fn far_from_the_origin_still_renders_at_the_right_pixel() {
-    let Some((device, queue)) = gpu() else { return };
+    let Some((device, queue, _gpu)) = gpu() else {
+        return;
+    };
     let base = [5000.0f32, 5000.0, 120.0];
     let p = [base[0] + 0.3, base[1], base[2] + 0.1];
     let mut scene = Scene::new();
