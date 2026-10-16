@@ -1,12 +1,13 @@
 //! GPU tests of the slot scene (decision 0052): points appear, move and disappear as messages are
-//! applied, in seq order, and draw in the same pass as chunk scenes. Skipped (pass with a message)
-//! when no GPU adapter is available, e.g. in CI.
+//! applied, in seq order, and draw in the same pass as chunk scenes; upload method (b), scatter,
+//! leaves the same slot bytes and the same captures as method (a), the mirror. Skipped (pass with a
+//! message) when no GPU adapter is available, e.g. in CI, or with `PB_NO_GPU=1`.
 //!
-//! `theater30_replace_events_apply_in_one_frame` also needs the real stream
-//! (`PB_THEATER30_STREAM=<…/live/stream>`, bench/data/README.md); it prints apply times:
-//! `cargo test -p pointblitz-core --release --test slots -- --nocapture`
+//! `theater30_replace_events_apply_in_one_frame` and `theater30_scatter_matches_mirror` also need
+//! the real stream (`PB_THEATER30_STREAM=<…/live/stream>`, bench/data/README.md); the first prints
+//! apply times: `cargo test -p pointblitz-core --release --test slots -- --nocapture`
 
-use pointblitz_core::{Applied, Camera, Headless, Scene, SlotScene};
+use pointblitz_core::{Applied, Camera, Headless, Scene, SlotScene, UploadMethod};
 use pointblitz_io::Point;
 use pointblitz_io::chunk::{FLAG_LAST_IN_GENERATION, encode as encode_chunk};
 use pointblitz_io::slots::{Record, SlotHeader, encode};
@@ -440,4 +441,300 @@ fn fit((lo, hi): ([f64; 3], [f64; 3])) -> Camera {
     let n = dir.iter().map(|v| v * v).sum::<f64>().sqrt();
     let eye = [0, 1, 2].map(|a| c[a] + dir[a] / n * d);
     Camera::new(eye, c, [0.0, 0.0, 1.0], 50.0)
+}
+
+// ---- Upload method (b), scatter (decision 0052 §2) ---------------------------------------------
+
+/// Small deterministic generator (xorshift64*).
+struct Rng(u64);
+
+impl Rng {
+    fn next(&mut self) -> u64 {
+        self.0 ^= self.0 >> 12;
+        self.0 ^= self.0 << 25;
+        self.0 ^= self.0 >> 27;
+        self.0.wrapping_mul(0x2545_f491_4f6c_dd1d)
+    }
+
+    fn below(&mut self, n: usize) -> usize {
+        (self.next() % n.max(1) as u64) as usize
+    }
+
+    fn coord(&mut self) -> f32 {
+        (self.next() >> 40) as f32 / (1u64 << 24) as f32 * 4.0 - 2.0
+    }
+
+    fn record(&mut self, id: u32) -> (u32, [f32; 3], [u8; 3]) {
+        (
+            id,
+            [self.coord(), self.coord(), self.coord()],
+            [self.next() as u8, self.next() as u8, self.next() as u8],
+        )
+    }
+}
+
+/// A synthetic stream like cumulus3d's: new ids are handed out upwards, moves and removes pick
+/// distinct live ids (an id is not moved and removed in the same event, a freed id is not reused in
+/// it). Every fourth event adds 3000 points, so the buffer grows several times.
+fn synthetic_stream(seed: u64, events: u32) -> Vec<Vec<u8>> {
+    let mut rng = Rng(seed);
+    let mut live: Vec<u32> = Vec::new();
+    let mut next_id = 0u32;
+    let mut out = Vec::new();
+    for seq in 1..=events {
+        let n_add = if seq % 4 == 2 { 3000 } else { rng.below(400) };
+        let adds: Vec<_> = (0..n_add as u32).map(|k| rng.record(next_id + k)).collect();
+        let n_move = rng.below(live.len() / 2 + 1).min(live.len());
+        let n_remove = rng.below(live.len() / 4 + 1).min(live.len() - n_move);
+        // Partial shuffle: the first n_move live ids move, the next n_remove go.
+        for k in 0..n_move + n_remove {
+            let j = k + rng.below(live.len() - k);
+            live.swap(k, j);
+        }
+        let moves: Vec<_> = live[..n_move].iter().map(|&id| rng.record(id)).collect();
+        let removes: Vec<u32> = live.drain(n_move..n_move + n_remove).collect();
+        live.extend(adds.iter().map(|a| a.0));
+        next_id += n_add as u32;
+        out.push(msg(seq, next_id, &adds, &moves, &removes));
+    }
+    out
+}
+
+/// A mirror scene and a scatter scene, or None (skipped) when the device cannot scatter.
+fn both(device: &wgpu::Device) -> Option<[SlotScene; 2]> {
+    if !UploadMethod::Scatter.supported(device) {
+        eprintln!("device without compute shaders / storage buffers — skipped");
+        return None;
+    }
+    Some([
+        SlotScene::new([0.0; 3]).with_upload(UploadMethod::Mirror),
+        SlotScene::new([0.0; 3]).with_upload(UploadMethod::Scatter),
+    ])
+}
+
+/// The two scenes hold the same bytes on the GPU and say the same things about them.
+fn assert_same(device: &wgpu::Device, queue: &wgpu::Queue, s: &[SlotScene; 2], what: &str) {
+    let [a, b] = s;
+    assert_eq!(a.upload(), UploadMethod::Mirror);
+    assert_eq!(b.upload(), UploadMethod::Scatter);
+    assert_eq!(
+        (a.capacity(), a.points(), a.seq(), a.held(), a.gpu_bytes()),
+        (b.capacity(), b.points(), b.seq(), b.held(), b.gpu_bytes()),
+        "{what}"
+    );
+    let (sa, sb) = (a.read_slots(device, queue), b.read_slots(device, queue));
+    assert_eq!(sa.len(), a.capacity() as usize * 16);
+    if let Some(i) = (0..sa.len()).find(|&i| sa[i] != sb[i]) {
+        let at = i / 16 * 16;
+        panic!(
+            "{what}: slot {} differs: mirror {:?}, scatter {:?}",
+            i / 16,
+            &sa[at..at + 16],
+            &sb[at..at + 16]
+        );
+    }
+}
+
+fn same_capture(
+    hl: &mut Headless,
+    gpu: (&wgpu::Device, &wgpu::Queue),
+    cam: &Camera,
+    s: &[SlotScene; 2],
+) -> bool {
+    let (device, queue) = gpu;
+    let a = hl.capture_with_slots(device, queue, cam, &[], &[&s[0]]);
+    let b = hl.capture_with_slots(device, queue, cam, &[], &[&s[1]]);
+    a == b
+}
+
+#[test]
+fn scatter_writes_the_same_slots_as_the_mirror() {
+    let Some((device, queue)) = gpu() else { return };
+    let cam = Camera::new([0.0, -8.0, 1.0], [0.0, 0.0, 0.0], [0.0, 0.0, 1.0], 50.0);
+    let mut hl = Headless::new(&device, [W, H]);
+    let stream = synthetic_stream(7, 16);
+    // Device limits, then bindings of 4 KiB (256 slots, about 200 records) and 2 workgroups per
+    // dimension, so packs are cut into batches, slots into windows and dispatches go 2-D.
+    for cap in [None, Some((4096u64, 2u32))] {
+        let Some(mut s) = both(&device) else { return };
+        if let Some((bytes, groups)) = cap {
+            s[1] = SlotScene::new([0.0; 3])
+                .with_upload(UploadMethod::Scatter)
+                .with_scatter_limits(bytes, groups);
+        }
+        for (k, m) in stream.iter().enumerate() {
+            let what = format!("{cap:?}, event {}", k + 1);
+            for scene in &mut s {
+                let r = scene.apply(&device, &queue, m).unwrap();
+                assert_eq!(r, Applied::Shown(vec![k as u32 + 1]), "{what}");
+            }
+            assert_same(&device, &queue, &s, &what);
+            assert!(
+                same_capture(&mut hl, (&device, &queue), &cam, &s),
+                "{what}: captures differ"
+            );
+        }
+        // Lost event 11, 12 and 13 held: the folded state through 11 replaces the scene, 12 and 13
+        // follow in the same call.
+        let mut fold = pointblitz_io::slots::Fold::new();
+        for m in &stream[..11] {
+            fold.apply(m).unwrap();
+        }
+        let state = fold.message();
+        for scene in &mut s {
+            scene.clear();
+            assert_eq!(
+                scene.apply(&device, &queue, &stream[11]).unwrap(),
+                Applied::Held
+            );
+            assert_eq!(
+                scene.apply(&device, &queue, &stream[12]).unwrap(),
+                Applied::Held
+            );
+            assert_eq!(
+                scene.apply_state(&device, &queue, &state).unwrap(),
+                Applied::Shown(vec![11, 12, 13])
+            );
+        }
+        assert_same(&device, &queue, &s, &format!("{cap:?}, recovered"));
+        assert!(
+            same_capture(&mut hl, (&device, &queue), &cam, &s),
+            "{cap:?}: captures differ after recovery"
+        );
+    }
+}
+
+#[test]
+fn scatter_keeps_ordering_growth_and_bounds() {
+    let Some((device, queue)) = gpu() else { return };
+    let Some(mut s) = both(&device) else { return };
+    let a = [1.0f32, 0.0, 0.0];
+    let b = [-1.0f32, 0.0, 0.5];
+    let one = msg(1, 2, &[(0, a, [255, 0, 0]), (1, b, [0, 255, 0])], &[], &[]);
+    // Slot 5000 forces a grow; slot 0 is moved, slot 1 removed in the same event.
+    let two = msg(
+        2,
+        5001,
+        &[(5000, b, [0, 0, 255])],
+        &[(0, b, [9, 9, 9])],
+        &[1],
+    );
+    let empty = msg(3, 5001, &[], &[], &[]);
+    for scene in &mut s {
+        assert_eq!(scene.apply(&device, &queue, &two).unwrap(), Applied::Held);
+        assert_eq!(
+            scene.apply(&device, &queue, &one).unwrap(),
+            Applied::Shown(vec![1, 2])
+        );
+        assert_eq!(
+            scene.apply(&device, &queue, &empty).unwrap(),
+            Applied::Shown(vec![3])
+        );
+        assert_eq!(scene.apply(&device, &queue, &one).unwrap(), Applied::Stale);
+        assert_eq!(scene.points(), 2);
+    }
+    assert_same(&device, &queue, &s, "after grow");
+    assert_eq!(
+        s[1].last_upload_bytes(),
+        0,
+        "an empty message writes nothing"
+    );
+    // Exact bounds with the mirror (slots 0 and 5000, both at b); with scatter the box of
+    // everything written (slot 0 was at a before it moved).
+    let b64 = b.map(f64::from);
+    assert_eq!(s[0].bounds(), Some((b64, b64)));
+    assert_eq!(s[1].bounds(), Some(([-1.0, 0.0, 0.0], [1.0, 0.0, 0.5])));
+    // A removed far point stays in the scatter box but not in the mirror's.
+    let far = msg(4, 5002, &[(5001, [50.0, 0.0, 0.0], [1; 3])], &[], &[]);
+    let gone = msg(5, 5002, &[], &[], &[5001]);
+    for scene in &mut s {
+        scene.apply(&device, &queue, &far).unwrap();
+        scene.apply(&device, &queue, &gone).unwrap();
+    }
+    assert_same(&device, &queue, &s, "after remove");
+    assert_eq!(s[0].bounds(), Some((b64, b64)));
+    assert_eq!(s[1].bounds().unwrap().1[0], 50.0);
+    // clear keeps the method.
+    s[1].clear();
+    assert_eq!(s[1].upload(), UploadMethod::Scatter);
+    assert_eq!(s[1].bounds(), None);
+}
+
+/// Real data: every theater30 event applied with both methods; after each the slot buffers are
+/// byte for byte the same and so are captures from two viewpoints. Then the folded state of the
+/// whole stream through `apply_state`.
+#[test]
+fn theater30_scatter_matches_mirror() {
+    let Ok(dir) = std::env::var("PB_THEATER30_STREAM") else {
+        eprintln!("PB_THEATER30_STREAM not set — skipped");
+        return;
+    };
+    let Some((device, queue)) = gpu() else { return };
+    let Some(mut s) = both(&device) else { return };
+    let mut stream = pointblitz_io::slots::dir::StreamDir::open(&dir).unwrap();
+    let messages = stream.messages().unwrap();
+    let mut fold = pointblitz_io::slots::Fold::new();
+    for (_, m) in &messages {
+        fold.apply(m).unwrap();
+    }
+    let state = fold.message();
+    s[0].apply_state(&device, &queue, &state).unwrap();
+    let (lo, hi) = s[0].bounds().unwrap();
+    let wide = fit((lo, hi));
+    let c = [0, 1, 2].map(|a| 0.5 * (lo[a] + hi[a]));
+    let close = Camera::new(
+        [c[0] - 20.0, c[1] - 30.0, c[2] + 15.0],
+        c,
+        [0.0, 0.0, 1.0],
+        50.0,
+    );
+    let mut hl = Headless::new(&device, [1280, 720]);
+    s[0].clear();
+    let compare = |hl: &mut Headless, s: &[SlotScene; 2], what: &str| {
+        assert_same(&device, &queue, s, what);
+        for (name, cam) in [("wide", &wide), ("close", &close)] {
+            assert!(
+                same_capture(hl, (&device, &queue), cam, s),
+                "{what}, {name}: captures differ"
+            );
+        }
+    };
+    for (e, m) in &messages {
+        for scene in &mut s {
+            assert_eq!(
+                scene.apply(&device, &queue, m).unwrap(),
+                Applied::Shown(vec![e.seq])
+            );
+            assert_eq!(scene.points(), e.points, "event {}", e.seq);
+        }
+        compare(&mut hl, &s, &format!("event {}", e.seq));
+        println!(
+            "seq {:2} {:8}: same slots ({} points), mirror wrote {:.1} MB, scatter {:.1} MB",
+            e.seq,
+            e.kind,
+            e.points,
+            s[0].last_upload_bytes() as f64 / 1e6,
+            s[1].last_upload_bytes() as f64 / 1e6
+        );
+    }
+    assert_eq!(s[1].capacity(), stream.manifest().capacity);
+    let one_by_one = s[1].read_slots(&device, &queue);
+    for scene in &mut s {
+        scene.apply_state(&device, &queue, &state).unwrap();
+    }
+    compare(&mut hl, &s, "folded state");
+    // Hidden slots keep their last bytes event by event but are zero in the folded state, so
+    // compare the shown slots only: the same slots with the same bytes.
+    let folded = s[1].read_slots(&device, &queue);
+    let shown = |b: &[u8]| -> Vec<[u8; 16]> {
+        b.as_chunks::<16>()
+            .0
+            .iter()
+            .map(|s| if s[15] & 1 != 0 { *s } else { [0; 16] })
+            .collect()
+    };
+    assert!(
+        shown(&one_by_one) == shown(&folded),
+        "folded state and events differ"
+    );
 }

@@ -4,6 +4,7 @@
 //! pointblitz-native --server http://127.0.0.1:8700 [--scenario replay|cold|orbit] [--speed 60]
 //!                   [--viewpoints bench/viewpoints/flight-01.json] [--view overview_sw]
 //!                   [--size 1920x1080] [--no-vsync] [--marks out.jsonl] [--exit-on-end]
+//!                   [--upload mirror|scatter]
 //! ```
 //!
 //! Mouse: drag to orbit, wheel to zoom. Keys 1–8: fixed viewpoints. Esc: quit.
@@ -23,10 +24,14 @@
 //! A replay server of a slot diff stream (`replay --stream`, decision 0052) is recognised from its
 //! manifest: each announced event's message is fetched and applied to a `SlotScene` whole, then
 //! marked like a snapshot (`snapshot_received`, `delivered`, `uploaded`, `submitted`, `presented`).
-//! Without `--viewpoints` the camera then frames the first state it gets.
+//! Without `--viewpoints` the camera then frames the first state it gets. `--upload` picks how the
+//! slot scene writes messages to the GPU (decision 0052 §2, A/B): `mirror` (method (a), the
+//! default) or `scatter` (method (b), compute shader; `mirror` on an adapter without compute).
 
 use pointblitz_core::renderer::DEPTH_FORMAT;
-use pointblitz_core::{Applied, Camera, GpuTimer, Inserted, Renderer, Scene, SlotScene};
+use pointblitz_core::{
+    Applied, Camera, GpuTimer, Inserted, Renderer, Scene, SlotScene, UploadMethod,
+};
 use pointblitz_io::client::{self as net, Msg, SlotMsg};
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
@@ -60,6 +65,8 @@ struct Args {
     continuous: bool,
     /// `--viewpoints` was given (otherwise a slot stream frames its first state).
     viewpoints_given: bool,
+    /// Slot scene upload method (decision 0052 §2, A/B).
+    upload: UploadMethod,
 }
 
 /// What the network threads send to the window thread.
@@ -85,6 +92,7 @@ fn parse_args() -> Result<Args, String> {
         memory_hints: wgpu::MemoryHints::MemoryUsage,
         continuous: false,
         viewpoints_given: false,
+        upload: UploadMethod::default(),
     };
     let mut it = std::env::args().skip(1);
     while let Some(k) = it.next() {
@@ -112,6 +120,7 @@ fn parse_args() -> Result<Args, String> {
             "--wait-before-exit" => a.wait_before_exit = true,
             "--batch" => a.batch = val()?.parse().map_err(|_| "--batch")?,
             "--continuous" => a.continuous = true,
+            "--upload" => a.upload = val()?.parse()?,
             "--memory-hints" => {
                 a.memory_hints = match val()?.as_str() {
                     "performance" => wgpu::MemoryHints::Performance,
@@ -390,10 +399,11 @@ impl App {
                             "uploaded",
                             Instant::now(),
                             &format!(
-                                ",\"seq\":{seq},\"points\":{},\"gpu_bytes\":{},\"upload_ms\":{apply_ms:.3},\"upload_bytes\":{},\"applied\":{seqs:?}",
+                                ",\"seq\":{seq},\"points\":{},\"gpu_bytes\":{},\"upload_ms\":{apply_ms:.3},\"upload_bytes\":{},\"upload\":\"{}\",\"applied\":{seqs:?}",
                                 self.slots.points(),
                                 self.slots.gpu_bytes(),
-                                self.slots.last_upload_bytes()
+                                self.slots.last_upload_bytes(),
+                                self.slots.upload()
                             ),
                         );
                         self.to_present.extend(seqs.into_iter().map(|s| (s, true)));
@@ -861,6 +871,20 @@ impl ApplicationHandler<Net> for App {
         // to the snapshot path, which reports it.
         if net::is_slot_stream(&host).unwrap_or(false) {
             eprintln!("server: slot diff stream");
+            if let Some(gpu) = &self.gpu {
+                let asked = self.args.upload;
+                let used = if asked.supported(&gpu.device) {
+                    asked
+                } else {
+                    UploadMethod::Mirror
+                };
+                eprintln!("slots upload: {used} (asked {asked})");
+                self.marks.add(
+                    "slots_upload",
+                    Instant::now(),
+                    &format!(",\"asked\":\"{asked}\",\"used\":\"{used}\""),
+                );
+            }
             self.fit_pending = !self.args.viewpoints_given;
             let send = move |m: SlotMsg| {
                 let _ = proxy.send_event(Net::Slots(m));
@@ -1010,13 +1034,14 @@ fn main() -> std::process::ExitCode {
             return std::process::ExitCode::FAILURE;
         }
     };
+    let upload = args.upload;
     let mut app = App {
         proxy: Some(event_loop.create_proxy()),
         args,
         gpu: None,
         scene: Scene::new(),
         // cumulus3d's `enu` frame: positions are metres from the stream origin, which is ENU 0.
-        slots: SlotScene::new([0.0; 3]),
+        slots: SlotScene::new([0.0; 3]).with_upload(upload),
         fit_pending: false,
         views,
         camera,

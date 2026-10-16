@@ -4,7 +4,7 @@
 //                                 --scenario replay|cold|orbit [--speed 60] [--metrics <file.jsonl>]
 //                                 [--exe target/release/pointblitz-server.exe] [--log <server log>]
 //                                 [--raw <file.json>] [--pacing buffer|immediate|adaptive (decisions 0039, 0040)] [--phase-lock on|off (decision 0042)] [--data <ply dir> (decision 0050)]
-//                                 [--timeout <s, default 300: fail a client that never finishes>]
+//                                 [--timeout <s, default 300: fail a client that never finishes>] [--upload mirror|scatter (slot streams, decision 0052 §2)]
 // Run from the repository root (serve reads bench/viewpoints/flight-01.json).
 //
 // Starts `pointblitz-server serve` (waits for the client, then follows the replay server), runs the
@@ -38,6 +38,7 @@ if (args['phase-lock']) serveArgs.push('--phase-lock', args['phase-lock']);
 if (args.fps) serveArgs.push('--fps', String(args.fps)); // frame rate (decision 0045); the server default is 60
 if (args.send) serveArgs.push('--send', args.send); // A/B of the send path (decision 0042)
 if (args.data) serveArgs.push('--data', args.data); // read the snapshots locally instead of over HTTP (decision 0050)
+if (args.upload) serveArgs.push('--upload', args.upload); // slot streams: mirror | scatter (decision 0052 §2 A/B)
 
 const serve = spawn(exe, serveArgs, { stdio: ['pipe', 'ignore', 'pipe'] });
 let serveErr = '';

@@ -28,8 +28,15 @@ owns a fixed slot id and each event carries only the points added, moved and rem
   stream directory. `bench/viewpoints/theater30-stable.json`.
 - Native viewer, browser (`apply_slots`, `slot_bounds`, …) and server video follow such a server and apply each
   event whole; the server video reads the stream directory itself with `--data` (decision 0050).
-- `pointblitz`: re-exports `SlotScene`, `Applied`, `ApplyError`; new feature `stream`.
-- Not measured yet (decision 0052 §5); the compute-shader upload, method (b), is not implemented.
+- `pointblitz`: re-exports `SlotScene`, `Applied`, `ApplyError`, `UploadMethod`; new feature `stream`.
+- Upload method (b) (decision 0052 §2): `SlotScene::with_upload(UploadMethod::Scatter)` writes each message's
+  pack as it is to a storage buffer and a compute shader scatters the records into the slots — the same slot
+  bytes as the mirror, no CPU mirror. WebGPU and native; on WebGL2 the scene keeps `Mirror`, the default.
+  `SlotScene::read_slots` (not wasm32) reads the slot buffer back. Selectable for the A/B: native
+  `--upload mirror|scatter`, server video `--upload`, browser `?upload=scatter` (`Viewer::set_slot_upload`), the
+  bench scripts pass it through, and `pointblitz-bench slot-apply --stream <dir>` times apply → GPU done per event
+  for both. `PB_NO_GPU=1` makes `headless::device()` return none, so the GPU tests skip.
+- Not measured yet (decision 0052 §5).
 
 ## 0.2.1 — 2026-10-16
 
