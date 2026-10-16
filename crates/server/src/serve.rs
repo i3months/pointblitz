@@ -438,8 +438,21 @@ pub fn run(args: &[String]) -> Result<(), String> {
                 Net::Slots(m) => {
                     match m {
                         // The whole event goes into this tick's frame (decision 0052).
-                        SlotMsg::Message { seq, bytes, at, .. } => {
-                            match slots.apply(&device, &queue, &bytes) {
+                        SlotMsg::Message {
+                            seq,
+                            bytes,
+                            state,
+                            at,
+                            ..
+                        } => {
+                            // A folded state (cold, or the fallback for a lost event) replaces
+                            // the scene.
+                            let r = if state {
+                                slots.apply_state(&device, &queue, &bytes)
+                            } else {
+                                slots.apply(&device, &queue, &bytes)
+                            };
+                            match r {
                                 Ok(Applied::Shown(seqs)) => {
                                     newest_visible = seqs.last().copied();
                                     visible.extend(seqs);

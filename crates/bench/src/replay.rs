@@ -555,6 +555,7 @@ pub(crate) fn respond(
 ) -> std::io::Result<()> {
     let reason = match code {
         200 => "OK",
+        400 => "Bad Request",
         204 => "No Content",
         404 => "Not Found",
         _ => "Method Not Allowed",

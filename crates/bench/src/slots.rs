@@ -11,9 +11,9 @@
 //! - `GET /events?speed=N&start=first|zero` — SSE stream, one `event: slots` per event with the same
 //!   JSON, then `event: end`.
 //! - `GET /slots/<seq>` — that event's message (header + pack).
-//! - `GET /slots/state?seq=N` — every message through `seq` N folded into one (a client joining
-//!   late starts from it). Without `seq`: through the newest event announced on any `/events`
-//!   stream so far, or the whole stream when nothing was announced (cold start).
+//! - `GET /slots/state?seq=N` — every message through `seq` N folded into one (cold start, a client
+//!   joining late, or one that could not get event N). `seq` is required (400 without it): each
+//!   `/events` subscriber has its own replay clock, so "so far" is the client's to say.
 //! - `GET /static/<path>` — files under the web root.
 
 use crate::replay::{parse_request_line, respond, safe_join, schedule_times, serve_file};
@@ -22,7 +22,6 @@ use pointblitz_io::slots::{Fold, validate};
 use std::io::{BufRead, BufReader, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
@@ -31,8 +30,9 @@ struct Server {
     manifest: Manifest,
     /// Per event (manifest order): its message.
     messages: Vec<Arc<Vec<u8>>>,
-    /// Newest seq announced on any `/events` stream; 0 before the first.
-    announced: AtomicU32,
+    /// Per event: its JSON (manifest entry and SSE data), made once at start-up so neither
+    /// `/manifest.json` nor an announcement reads a message.
+    events_json: Vec<String>,
     /// The last folded state served: (seq, message).
     state: Mutex<Option<(u32, Arc<Vec<u8>>)>>,
 }
@@ -40,17 +40,24 @@ struct Server {
 impl Server {
     fn load(dir: PathBuf, web: Option<PathBuf>) -> Result<Self, String> {
         let mut s = StreamDir::open(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
-        let messages = s
+        let mut messages = Vec::new();
+        let mut events_json = Vec::new();
+        for (e, m) in s
             .messages()
             .map_err(|e| format!("{}: {e}", dir.display()))?
-            .into_iter()
-            .map(|(_, m)| Arc::new(m))
-            .collect();
+        {
+            // StreamDir::message validated it; the capacity after the event is in its header.
+            let capacity = validate(&m)
+                .map_err(|err| format!("event {}: {err}", e.seq))?
+                .capacity;
+            events_json.push(event_json(&e, capacity));
+            messages.push(Arc::new(m));
+        }
         Ok(Self {
             web,
             manifest: s.manifest().clone(),
             messages,
-            announced: AtomicU32::new(0),
+            events_json,
             state: Mutex::new(None),
         })
     }
@@ -86,18 +93,9 @@ pub fn event_json(e: &StreamEvent, capacity: u32) -> String {
     )
 }
 
-fn capacity_of(m: &[u8]) -> u32 {
-    validate(m).map_or(0, |h| h.capacity)
-}
-
 fn manifest_json(server: &Server) -> String {
     let m = &server.manifest;
-    let events: Vec<String> = m
-        .events
-        .iter()
-        .zip(&server.messages)
-        .map(|(e, msg)| event_json(e, capacity_of(msg)))
-        .collect();
+    let events = &server.events_json;
     let origin = m
         .origin_gps
         .map_or("null".into(), |o| format!("[{},{},{}]", o[0], o[1], o[2]));
@@ -163,14 +161,10 @@ fn handle(server: &Server, mut stream: TcpStream) -> std::io::Result<()> {
             stream_events(server, &mut stream, speed.max(1e-6), start_first)
         }
         "/slots/state" => {
-            let seq = match q("seq") {
-                Some(s) => s.parse().ok(),
-                None => match server.announced.load(Ordering::SeqCst) {
-                    0 => server.manifest.events.last().map(|e| e.seq),
-                    s => Some(s),
-                },
+            let Some(seq) = q("seq") else {
+                return respond(&mut stream, 400, "text/plain", b"seq is required");
             };
-            match seq.and_then(|s| server.index(s)) {
+            match seq.parse().ok().and_then(|s| server.index(s)) {
                 Some(idx) => {
                     let t = Instant::now();
                     let m = server.state(idx);
@@ -232,18 +226,14 @@ fn stream_events(
     stream.flush()?;
     let times: Vec<f64> = server.manifest.events.iter().map(|e| e.t).collect();
     let t0 = Instant::now();
-    for ((e, msg), at) in server
-        .manifest
-        .events
+    for (json, at) in server
+        .events_json
         .iter()
-        .zip(&server.messages)
         .zip(schedule_times(&times, speed, start_first))
     {
         if let Some(wait) = at.checked_sub(t0.elapsed()) {
             std::thread::sleep(wait);
         }
-        server.announced.fetch_max(e.seq, Ordering::SeqCst);
-        let json = event_json(e, capacity_of(msg));
         write!(stream, "event: slots\ndata: {json}\n\n")?;
         stream.flush()?;
         let unix_ms = SystemTime::now()
@@ -338,6 +328,28 @@ mod tests {
             Arc::ptr_eq(&s2, &server.state(1)),
             "kept for the next request"
         );
+        assert!(json.contains(r#""capacity":4,"url":"/slots/2""#));
+        // Over HTTP: /slots/state needs seq.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = Arc::new(server);
+        std::thread::spawn(move || {
+            for s in listener.incoming().flatten() {
+                handle(&server, s).unwrap();
+            }
+        });
+        let status = |path: &str| {
+            use std::io::Read;
+            let mut s = TcpStream::connect(addr).unwrap();
+            write!(s, "GET {path} HTTP/1.1\r\nHost: x\r\n\r\n").unwrap();
+            let mut out = Vec::new();
+            s.read_to_end(&mut out).ok();
+            let out = String::from_utf8_lossy(&out);
+            out.lines().next().unwrap_or("").to_string()
+        };
+        assert!(status("/slots/state").contains(" 400 "));
+        assert!(status("/slots/state?seq=2").contains(" 200 "));
+        assert!(status("/slots/state?seq=9").contains(" 404 "));
         std::fs::remove_dir_all(&dir).ok();
     }
 }

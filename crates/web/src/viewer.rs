@@ -204,7 +204,22 @@ impl Viewer {
         })
     }
 
-    /// Empties the slot scene, e.g. before applying a folded state.
+    /// Clears the slot scene and applies a folded state (`/slots/state?seq=N`, cold start or the
+    /// fallback for an event that could not be fetched); held events after it follow. Returns like
+    /// `apply_slots`.
+    pub fn apply_slots_state(&mut self, message: &[u8]) -> Result<String, JsValue> {
+        let r = self
+            .slots
+            .apply_state(&self.device, &self.queue, message)
+            .map_err(|e| err("slots", e))?;
+        Ok(match r {
+            Applied::Shown(seqs) => format!("{{\"applied\":{seqs:?}}}"),
+            Applied::Held => "held".into(),
+            Applied::Stale => "stale".into(),
+        })
+    }
+
+    /// Empties the slot scene; the next event taken is seq 1 again.
     pub fn clear_slots(&mut self) {
         self.slots.clear();
     }

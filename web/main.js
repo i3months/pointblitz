@@ -14,8 +14,9 @@
 //   viewpoints = file under /static/ (default bench/viewpoints/flight-01.json)
 //
 // A replay server of a slot diff stream (`replay --stream`, decision 0052; "stream":"slots" in its
-// manifest) announces `slots` events: each event's message (/slots/<seq>) is applied whole to the
-// viewer's slot scene; cold fetches the folded state (/slots/state?seq=<last>). The marks are the
+// manifest) announces `slots` events: each event's message (/slots/<seq>) is fetched as it is
+// announced and applied whole to the viewer's slot scene, in seq order; one that cannot be fetched
+// is replaced by the folded state through it. Cold fetches the folded state (/slots/state?seq=<last>). The marks are the
 // same; `uploaded` carries upload_ms (apply time) and upload_bytes. Without `viewpoints` the camera
 // frames the first state.
 //
@@ -203,18 +204,40 @@ function fitCamera() {
   applyCamera();
 }
 
-/** Fetches one slot message (an event, or `state` = everything through it) and applies it whole. */
+/** GET as bytes; throws on a failed request. */
+async function getBytes(url) {
+  const res = await fetch(url, { cache: 'no-store' });
+  if (!res.ok) throw new Error(`${url}: ${res.status}`);
+  return new Uint8Array(await res.arrayBuffer());
+}
+
+const slotAttempts = 3; // tries per event before falling back to the folded state
+
+/**
+ * Fetches one slot message (an event, or `state` = everything through it) and applies it whole.
+ * Events are fetched as they are announced, so they may complete out of order: the viewer holds a
+ * message until the ones before it are in. An event that cannot be fetched after retries is
+ * replaced by the folded state through it, applied with apply_slots_state (otherwise every later
+ * event would wait for it, and without event 1 the scene would never start).
+ */
 async function deliverSlots(ev, state = false) {
   mark('fetch_start', { seq: ev.seq });
-  const res = await fetch(state ? `/slots/state?seq=${ev.seq}` : `/slots/${ev.seq}`, { cache: 'no-store' });
-  if (!res.ok) throw new Error(`slots ${ev.seq}: ${res.status}`);
+  let bytes = null;
+  for (let k = 0; !state && k < slotAttempts && !bytes; k++) {
+    if (k > 0) await new Promise((r) => setTimeout(r, 100));
+    bytes = await getBytes(`/slots/${ev.seq}`).catch((e) => (mark('slots_fetch_error', { seq: ev.seq, message: String(e) }), null));
+  }
+  if (!bytes) {
+    state = true;
+    bytes = await getBytes(`/slots/state?seq=${ev.seq}`);
+  }
+  const delivery = state ? 'slots_state' : 'slots';
   mark('headers', { seq: ev.seq });
-  const bytes = new Uint8Array(await res.arrayBuffer());
   mark('last_chunk_received', { seq: ev.seq });
-  mark('fetch_end', { seq: ev.seq, bytes: bytes.length, delivery: 'slots' });
-  mark('delivered', { seq: ev.seq, bytes: bytes.length, delivery: 'slots' });
+  mark('fetch_end', { seq: ev.seq, bytes: bytes.length, delivery });
+  mark('delivered', { seq: ev.seq, bytes: bytes.length, delivery });
   const t0 = performance.now();
-  const r = viewer.apply_slots(bytes);
+  const r = state ? viewer.apply_slots_state(bytes) : viewer.apply_slots(bytes);
   const ms = performance.now() - t0;
   if (r === 'held' || r === 'stale') {
     mark('slots_' + r, { seq: ev.seq });
@@ -228,31 +251,50 @@ async function deliverSlots(ev, state = false) {
 }
 
 async function replaySlots() {
-  let chain = Promise.resolve();
+  // Each event is fetched the moment it is announced (events 8–10 of theater30 come 70 ms apart);
+  // the slot scene applies them in seq order.
+  const deliveries = [];
   await new Promise((resolve, reject) => {
     const es = new EventSource(`/events?speed=${speed}`);
     es.addEventListener('slots', (m) => {
       const ev = JSON.parse(m.data);
       mark('snapshot_received', { seq: ev.seq, kind: ev.kind });
-      chain = chain.then(() => deliverSlots(ev));
-      chain.catch(reject);
+      const d = deliverSlots(ev);
+      d.catch(reject);
+      deliveries.push(d);
     });
     es.addEventListener('end', () => {
       es.close();
-      chain.then(resolve, reject);
+      Promise.all(deliveries).then(resolve, reject);
     });
     es.onerror = () => {
       if (es.readyState === EventSource.CLOSED) reject(new Error('event stream closed'));
     };
   });
-  await allPresented();
+  await allSlotsPresented();
+}
+
+/**
+ * Resolves when every received event has been presented. Counting uploads (allPresented) does not
+ * work here: a held event has no upload of its own and is presented with the one that releases it.
+ */
+function allSlotsPresented() {
+  return new Promise((resolve) => {
+    const check = () => {
+      const presented = new Set(pb.marks.filter((m) => m.name === 'presented').map((m) => m.seq));
+      const missing = pb.marks.filter((m) => m.name === 'snapshot_received' && !presented.has(m.seq));
+      if (missing.length === 0 && toPresent.length === 0) resolve();
+      else requestAnimationFrame(check);
+    };
+    check();
+  });
 }
 
 async function coldSlots(events) {
   const last = events[events.length - 1];
   mark('snapshot_received', { seq: last.seq, kind: last.kind });
   await deliverSlots(last, true);
-  await allPresented();
+  await allSlotsPresented();
 }
 
 /** Resolves when every delivered snapshot has been presented. */

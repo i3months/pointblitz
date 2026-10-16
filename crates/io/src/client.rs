@@ -428,10 +428,13 @@ pub enum SlotMsg {
         event: SlotEvent,
         at: Instant,
     },
-    /// An event's message (or, cold, the folded state) is complete.
+    /// An event's message is complete.
     Message {
         seq: u32,
         bytes: Vec<u8>,
+        /// A folded state through `seq` (cold start, or the fallback after an event could not be
+        /// fetched): clear the scene and apply it (`SlotScene::apply_state`).
+        state: bool,
         fetch_start: Instant,
         /// When its last byte arrived (or it was read from the local directory).
         at: Instant,
@@ -526,10 +529,11 @@ fn slot_fetch_loop(
 ) {
     for event in rx {
         let fetch_start = Instant::now();
-        match source.fetch(host, event.seq, false) {
-            Ok(bytes) => send(SlotMsg::Message {
+        match fetch_or_state(host, &mut source, event.seq) {
+            Ok((bytes, state)) => send(SlotMsg::Message {
                 seq: event.seq,
                 bytes,
+                state,
                 fetch_start,
                 at: Instant::now(),
             }),
@@ -537,6 +541,36 @@ fn slot_fetch_loop(
         }
     }
     send(SlotMsg::End);
+}
+
+/// Attempts at an event's message before falling back to the folded state.
+const SLOT_ATTEMPTS: u32 = 3;
+/// Wait between attempts.
+const SLOT_RETRY: std::time::Duration = std::time::Duration::from_millis(100);
+
+/// Event `seq`'s message, retried; if it still cannot be had, the folded state through `seq` (true):
+/// a client holding later events would otherwise wait for this one forever, and a client without
+/// event 1 must not start from event 2.
+fn fetch_or_state(
+    host: &str,
+    source: &mut SlotSource,
+    seq: u32,
+) -> std::io::Result<(Vec<u8>, bool)> {
+    let mut last = None;
+    for k in 0..SLOT_ATTEMPTS {
+        if k > 0 {
+            std::thread::sleep(SLOT_RETRY);
+        }
+        match source.fetch(host, seq, false) {
+            Ok(bytes) => return Ok((bytes, false)),
+            Err(e) => last = Some(e),
+        }
+    }
+    let e = last.expect("at least one attempt");
+    source
+        .fetch(host, seq, true)
+        .map(|b| (b, true))
+        .map_err(|s| std::io::Error::other(format!("{e}; folded state through {seq}: {s}")))
 }
 
 /// Replay of a slot stream: follows `/events?speed=…` and fetches each event's message as it is
@@ -622,6 +656,7 @@ pub fn spawn_slots_cold(
             send(SlotMsg::Message {
                 seq,
                 bytes,
+                state: true,
                 fetch_start,
                 at: Instant::now(),
             });
@@ -639,6 +674,84 @@ mod tests {
     use super::*;
     use crate::Point;
     use crate::chunk::encode;
+
+    /// A replay server where `/slots/1` fails once, `/slots/2` always fails and
+    /// `/slots/state?seq=2` works: the follower retries 1, falls back to the state for 2, then 3.
+    #[test]
+    fn slot_follower_retries_then_falls_back_to_the_folded_state() {
+        use crate::slots::{SlotHeader, encode};
+        use std::net::TcpListener;
+        let m = |seq: u32| {
+            let h = SlotHeader {
+                seq,
+                ..Default::default()
+            };
+            encode(&h, &[]).unwrap()
+        };
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let host = listener.local_addr().unwrap().to_string();
+        let served = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let log = served.clone();
+        std::thread::spawn(move || {
+            let mut first_one = true;
+            for stream in listener.incoming() {
+                let mut stream = stream.unwrap();
+                let mut line = String::new();
+                let mut r = BufReader::new(&stream);
+                r.read_line(&mut line).unwrap();
+                // Read the whole request, so closing does not reset the connection.
+                let mut h = String::new();
+                while r.read_line(&mut h).unwrap() > 2 {
+                    h.clear();
+                }
+                let path = line.split_whitespace().nth(1).unwrap_or("").to_string();
+                log.lock().unwrap().push(path.clone());
+                let body = match path.as_str() {
+                    "/slots/1" if first_one => {
+                        first_one = false;
+                        None
+                    }
+                    "/slots/1" => Some(m(1)),
+                    "/slots/state?seq=2" => Some(m(2)),
+                    "/slots/3" => Some(m(3)),
+                    _ => None,
+                };
+                let head = match &body {
+                    Some(b) => format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n", b.len()),
+                    None => "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n".into(),
+                };
+                stream.write_all(head.as_bytes()).unwrap();
+                stream.write_all(&body.unwrap_or_default()).unwrap();
+            }
+        });
+        let (tx, rx) = mpsc::channel();
+        for seq in 1..=3 {
+            tx.send(SlotEvent {
+                seq,
+                kind: "refined".into(),
+                points: 0,
+                bytes: 0,
+            })
+            .unwrap();
+        }
+        drop(tx);
+        let got = std::sync::Mutex::new(Vec::new());
+        slot_fetch_loop(&host, SlotSource::Http, rx, &|msg| {
+            if let SlotMsg::Message { seq, state, .. } = msg {
+                got.lock().unwrap().push((seq, state));
+            }
+        });
+        assert_eq!(
+            got.into_inner().unwrap(),
+            vec![(1, false), (2, true), (3, false)]
+        );
+        let served = served.lock().unwrap();
+        assert_eq!(served.iter().filter(|p| *p == "/slots/1").count(), 2);
+        assert_eq!(
+            served.iter().filter(|p| *p == "/slots/2").count(),
+            SLOT_ATTEMPTS as usize
+        );
+    }
 
     #[test]
     fn parses_slot_events() {

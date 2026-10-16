@@ -355,26 +355,34 @@ impl App {
             SlotMsg::Message {
                 seq,
                 bytes,
+                state,
                 fetch_start,
                 at,
             } => {
                 self.marks
                     .add("fetch_start", fetch_start, &format!(",\"seq\":{seq}"));
                 let fetch_ms = at.duration_since(fetch_start).as_secs_f64() * 1e3;
+                let delivery = if state { "slots_state" } else { "slots" };
                 self.marks.add(
                     "delivered",
                     at,
                     &format!(
-                        ",\"seq\":{seq},\"delivery\":\"slots\",\"bytes\":{},\"fetch_ms\":{fetch_ms:.3}",
+                        ",\"seq\":{seq},\"delivery\":\"{delivery}\",\"bytes\":{},\"fetch_ms\":{fetch_ms:.3}",
                         bytes.len()
                     ),
                 );
                 let s = self.snaps.entry(seq).or_default();
-                s.delivery = "slots".into();
+                s.delivery = delivery.into();
                 s.bytes = bytes.len() as u64;
                 let Some(gpu) = &self.gpu else { return };
                 let t = Instant::now();
-                let applied = self.slots.apply(&gpu.device, &gpu.queue, &bytes);
+                // A folded state (cold, or the fallback for an event that could not be fetched)
+                // replaces the scene.
+                let applied = if state {
+                    self.slots.apply_state(&gpu.device, &gpu.queue, &bytes)
+                } else {
+                    self.slots.apply(&gpu.device, &gpu.queue, &bytes)
+                };
                 let apply_ms = t.elapsed().as_secs_f64() * 1e3;
                 match applied {
                     Ok(Applied::Shown(seqs)) => {
