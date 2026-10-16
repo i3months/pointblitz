@@ -47,6 +47,15 @@
 - **`/slots/state` 는 `seq` 가 필수**(`?seq=N`, 없으면 400): 재생 서버는 `/events` 구독마다 시계가 따로라 "지금까지" 는 클라이언트가 정한다.
 - **접은 상태 = `clear()` 뒤 적용**: 접은 상태는 add 만 있는 보통 메시지라 머리에 표시가 없다. 클라이언트가 `SlotScene::apply_state`(장면을 비우고 그 seq 부터 시작, 보관 중인 뒤 사건은 이어서 적용)로 적용한다. 새 장면은 seq 1 또는 접은 상태로만 시작한다(`expect` 로 명시할 수 있다). 사건 메시지를 몇 번 다시 받아도 못 받으면 그 사건까지 접은 상태로 대신한다.
 
+## 구현 메모(방법 (b))
+- **고르기**: `SlotScene::with_upload(UploadMethod::{Mirror, Scatter})`, 기본은 `Mirror`(§5 측정 전까지). 쓰는 방법은 버퍼를 만들 때 정한다 — 계산 셰이더·저장 버퍼가 없는 장치(WebGL2)는 `Scatter` 를 받아도 `Mirror`. `clear`·`apply_state` 뒤에도 방법은 그대로. A/B 스위치: native `--upload mirror|scatter`, 서버 영상 `--upload`, 브라우저 `?upload=scatter`(`uploaded` 표시에 `upload`), `bench/native/run.mjs`·`bench/video/run.mjs` 의 `--upload`, 웹 측정은 `baseline/three/run.mjs --query upload=scatter`.
+- **올림**: 메시지의 팩(머리 뒤 바이트)을 그대로 저장 버퍼에 `write_buffer`, 계산 셰이더(`scatter.wgsl`)가 `array<u32>` 로 읽는다(레코드 20 B·4 B 는 4 바이트 정렬). add·move 는 칸의 네 단어를 쓰고(넷째 단어 = 레코드의 `r g b` + 칸의 다른 플래그 비트 + 보임), remove 는 보임 비트만 끈다 — (a) 의 거울과 같은 바이트(숨긴 칸도 마지막 값을 그대로 둔다). 패스 안의 디스패치는 차례대로라 add → move → remove 순서도 (a) 와 같다. 한 구역 안에서 같은 id 가 두 번 나오면(생산자는 내지 않는다) 어느 것이 남는지 정해지지 않는다(거울은 마지막).
+- **한도**: 팩은 레코드 경계에서 `max_storage_buffer_binding_size`(정렬해 내림) 이하 묶음으로 자르고 묶음마다 `write_buffer` 와 제출 하나(theater30 은 가장 큰 팩 14 MB, 접은 상태 57.6 MB 라 기본 128 MiB 에서 묶음 하나). 슬롯 버퍼가 한도보다 크면 창(256 B 정렬)으로 나눠 디스패치마다 한 창만 묶고 그 창 밖 레코드는 건너뛴다. 작업 그룹은 64, 한 차원 65,535 를 넘으면 2 차원으로 편다. 시험은 한도를 4 KiB·그룹 2 로 낮춰 자르기를 돈다(`with_scatter_limits`, 숨긴 API).
+- **늘림**: (a) 와 같다(두 배, GPU 복사 제출 뒤 흩뿌리기 제출). `Scatter` 의 슬롯 버퍼에는 `STORAGE` 용도를 더한다.
+- **CPU 쪽**: 거울은 없다. 칸마다 보임 비트 하나(theater30 360 KB)로 `points` 를 세고, `bounds` 는 지운 뒤 쓴 모든 위치의 상자다(보이는 칸만의 정확한 상자보다 클 수 있다 — 클라이언트는 첫 상태를 잡는 데만 쓴다). `apply_state`·`seq` 순서·보관·받기 실패 시 접은 상태 대체는 (a) 와 같다. `last_upload_bytes` 는 팩 바이트.
+- **시험**(GPU, 어댑터가 없거나 `PB_NO_GPU=1` 이면 건너뜀): 합성 스트림 16 사건(늘림 여러 번, 보관·`apply_state` 회복)에서 사건마다 두 방법의 슬롯 버퍼 바이트·`points`·`capacity`·화면이 같음(기기 한도와 낮춘 한도 둘 다), `PB_THEATER30_STREAM` 이 있으면 실제 14 사건마다 같은 비교(두 시점 1280×720)와 접은 상태. 셰이더는 GPU 없이도 naga 로 검사한다.
+- **시간 도구**: `pointblitz-bench slot-apply --stream <dir> [--runs 5]` — 사건마다 apply 반환, apply → GPU 끝(빈 제출로 대기 중인 쓰기를 내보낸 뒤 대기), 그 뒤 한 프레임 끝까지를 두 방법 번갈아 잰다(중앙값, `--out` 은 표본 전부). `GpuTimer` 는 그리기 패스만 재므로 쓰지 않았다. 측정 결과와 판정은 §5 측정 계획 문서에서 한다.
+
 ## 대가
 - 차분은 바이트가 더 많다(이 실행 125.4 MB, 통째 한 번의 2.2 배). replace 의 move 가 크기 때문이다. 대역폭은 제약이 아니다(INTENT 원칙 2).
 - 장면 종류가 둘(`Scene` 세대, `SlotScene` 슬롯)이 된다. 그리기 셰이더는 같고 버퍼 관리만 다르다.

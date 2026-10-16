@@ -19,5 +19,5 @@ pub use layers::{
 };
 pub use renderer::{PointSize, Renderer};
 pub use scene::{Inserted, Scene};
-pub use slots::{Applied, ApplyError, SlotScene};
+pub use slots::{Applied, ApplyError, SlotScene, UploadMethod};
 pub use timer::GpuTimer;

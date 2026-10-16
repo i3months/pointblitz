@@ -1432,6 +1432,7 @@ dependencies = [
  "pointblitz-core",
  "pointblitz-io",
  "serde_json",
+ "wgpu",
 ]
 
 [[package]]

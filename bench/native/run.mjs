@@ -3,6 +3,7 @@
 // usage: node bench/native/run.mjs --server http://127.0.0.1:8700 --scenario replay|cold|orbit
 //                                  [--speed 60] [--metrics <file.jsonl>] [--raw <file.json>]
 //                                  [--exe target/release/pointblitz-native.exe] [--no-vsync]
+//                                  [--upload mirror|scatter (slot streams, decision 0052 §2)]
 //
 // The native viewer writes marks (crates/native, decision 0026); this script turns them into the
 // same raw shape the baseline page produces and runs the same summarize() (baseline/three/metrics.mjs),
@@ -29,6 +30,7 @@ if (args['no-vsync']) cli.push('--no-vsync');
 if (args.continuous) cli.push('--continuous');
 if (args.batch) cli.push('--batch', String(args.batch));
 if (args['memory-hints']) cli.push('--memory-hints', args['memory-hints']);
+if (args.upload) cli.push('--upload', args.upload); // slot streams: mirror | scatter (decision 0052 §2 A/B)
 
 const t0 = Date.now();
 const spawnAt = Date.now();

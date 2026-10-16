@@ -5,7 +5,7 @@
 //! pointblitz-server serve --replay http://127.0.0.1:8700 [--port 8720] [--speed 60] [--qp 18]
 //!                         [--fps 60] [--viewpoints bench/viewpoints/flight-01.json] [--view overview_sw]
 //!                         [--exit-after-end <s>] [--wait-for-client] [--cold | --orbit] [--log <file>] [--wait-before-exit]
-//!                         [--phase-lock on|off] [--send poll] [--data <dir>]
+//!                         [--phase-lock on|off] [--send poll] [--data <dir>] [--upload mirror|scatter]
 //! ```
 //!
 //! `--data <dir>` (decision 0050): the replay server's data directory is on this machine — the
@@ -16,7 +16,8 @@
 //! manifest; each event's message is applied to a `SlotScene` whole in the tick it arrives. With
 //! `--data <dir>` the dir is the stream directory (`live/stream`) on this machine and the messages
 //! are read there. Frame metadata and announcements are the same as for snapshots (`visible` lists
-//! the events applied in that frame).
+//! the events applied in that frame). `--upload` picks the slot scene's upload method (decision 0052
+//! §2, A/B): `mirror` (method (a), the default) or `scatter` (method (b), compute shader).
 //!
 //! Each frame is one binary WebSocket message: `u32 LE metadata length`, the metadata (UTF-8 JSON),
 //! then the H.264 access unit (Annex B). Metadata: `frame` (counter), `idr`, `t_ms` (server clock,
@@ -39,7 +40,7 @@
 use crate::nvenc::{Config, Encoder};
 use crate::phase::PhaseLock;
 use glam::DVec3;
-use pointblitz_core::{Applied, Camera, Headless, Inserted, Scene, SlotScene};
+use pointblitz_core::{Applied, Camera, Headless, Inserted, Scene, SlotScene, UploadMethod};
 use pointblitz_io::client::{self, Msg, SlotMsg};
 use std::fmt::Write as _;
 use std::net::{TcpListener, TcpStream};
@@ -330,6 +331,7 @@ pub fn run(args: &[String]) -> Result<(), String> {
     };
     // --send poll: the earlier polling send path (A/B only, see client_thread).
     let poll_send = arg(args, "--send") == Some("poll");
+    let upload: UploadMethod = arg(args, "--upload").unwrap_or("mirror").parse()?;
     let mut camera = views
         .list
         .iter()
@@ -343,7 +345,15 @@ pub fn run(args: &[String]) -> Result<(), String> {
     let mut hl = Headless::new(&device, [w, h]);
     let mut scene = Scene::new();
     // cumulus3d's `enu` frame: slot positions are metres from ENU 0.
-    let mut slots = SlotScene::new([0.0; 3]);
+    let mut slots = SlotScene::new([0.0; 3]).with_upload(upload);
+    eprintln!(
+        "slots upload: {} (asked {upload})",
+        if upload.supported(&device) {
+            upload
+        } else {
+            UploadMethod::Mirror
+        }
+    );
     let mut encoder = Encoder::new(Config {
         width: w,
         height: h,

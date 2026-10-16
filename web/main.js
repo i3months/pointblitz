@@ -12,6 +12,8 @@
 //   backend  = auto | webgpu | webgl   (auto: WebGPU when available, otherwise WebGL2 — P2.4)
 //   pkg      = full | webgpu           (webgpu: the WebGPU-only module, 0.37 MB instead of 4.25 MB — decision 0033)
 //   viewpoints = file under /static/ (default bench/viewpoints/flight-01.json)
+//   upload   = mirror | scatter        (slot streams, decision 0052 §2 A/B: method (a) CPU mirror, the
+//                                       default, or (b) compute-shader scatter; WebGL2 always mirror)
 //
 // A replay server of a slot diff stream (`replay --stream`, decision 0052; "stream":"slots" in its
 // manifest) announces `slots` events: each event's message (/slots/<seq>) is fetched as it is
@@ -35,6 +37,7 @@ const speed = Number(params.get('speed') ?? 60);
 const backend = params.get('backend') ?? 'auto';
 const memoryHints = params.get('memory') ?? 'memory'; // A/B: memory | performance (decision 0034)
 const pkgDir = params.get('pkg') === 'webgpu' ? './pkg-webgpu/' : './pkg/';
+const slotUpload = params.get('upload') ?? 'mirror'; // A/B: mirror | scatter (decision 0052 §2)
 let Viewer = null;
 const pb = (window.__pb = { marks: [], frames: [], longtasks: [], syncFrames: [], stages: [], ready: false, done: false, setView });
 const mark = (name, extra = {}) => pb.marks.push({ name, t: performance.now(), ...extra });
@@ -244,7 +247,7 @@ async function deliverSlots(ev, state = false) {
     return;
   }
   const { applied } = JSON.parse(r);
-  mark('uploaded', { seq: ev.seq, points: viewer.points(), gpu_bytes: viewer.gpu_bytes(), upload_ms: ms, upload_bytes: viewer.slot_upload_bytes(), applied });
+  mark('uploaded', { seq: ev.seq, points: viewer.points(), gpu_bytes: viewer.gpu_bytes(), upload_ms: ms, upload_bytes: viewer.slot_upload_bytes(), upload: viewer.slot_upload(), applied });
   for (const seq of applied) toPresent.push([seq, 'all']);
   if (fitPending) fitCamera();
   dirty = true;
@@ -407,10 +410,11 @@ async function main() {
   mark('viewer_create_end');
   if (params.get('glcopy') === '0') viewer.set_readback_copy(false); // P4.2 A/B only
   pb.info = JSON.parse(viewer.info());
+  pb.slotUpload = { asked: slotUpload, used: viewer.set_slot_upload(slotUpload) };
   // WebGPU does not give wgpu the adapter name; the browser's GPUAdapter.info says which GPU it is.
   const a = navigator.gpu && pb.info.backend === 'BrowserWebGpu' ? await navigator.gpu.requestAdapter({ powerPreference: 'high-performance' }) : null;
   pb.gpu = a && { vendor: a.info.vendor, architecture: a.info.architecture, device: a.info.device, description: a.info.description };
-  mark('viewer', { info: pb.info, gpu: pb.gpu });
+  mark('viewer', { info: pb.info, gpu: pb.gpu, slot_upload: pb.slotUpload });
   requestAnimationFrame(frame);
   if (scenario === 'check') return;
 

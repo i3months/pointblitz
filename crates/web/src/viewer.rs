@@ -4,7 +4,9 @@
 use crate::json_str;
 use crate::oneshot::Signal;
 use pointblitz_core::renderer::DEPTH_FORMAT;
-use pointblitz_core::{Applied, Camera, GpuTimer, Inserted, Renderer, Scene, SlotScene};
+use pointblitz_core::{
+    Applied, Camera, GpuTimer, Inserted, Renderer, Scene, SlotScene, UploadMethod,
+};
 use std::cell::RefCell;
 use std::rc::Rc;
 use wasm_bindgen::prelude::*;
@@ -224,9 +226,29 @@ impl Viewer {
         self.slots.clear();
     }
 
-    /// GPU bytes the last `apply_slots` wrote (the changed slot range).
+    /// GPU bytes the last `apply_slots` wrote (the changed slot range, or the packs with scatter).
     pub fn slot_upload_bytes(&self) -> f64 {
         self.slots.last_upload_bytes() as f64
+    }
+
+    /// How the slot scene writes messages to the GPU (decision 0052 §2, A/B): `mirror` (method
+    /// (a)) or `scatter` (method (b), compute shader, WebGPU only). Takes effect for an empty scene
+    /// (before the first message, or after `clear_slots`). Returns the method that will be used:
+    /// `mirror` on WebGL2 whatever was asked.
+    pub fn set_slot_upload(&mut self, method: &str) -> Result<String, JsValue> {
+        let m: UploadMethod = method.parse().map_err(|e| err("upload", e))?;
+        self.slots.set_upload(m);
+        Ok(if m.supported(&self.device) {
+            m
+        } else {
+            UploadMethod::Mirror
+        }
+        .to_string())
+    }
+
+    /// The slot scene's upload method in use (`mirror` or `scatter`).
+    pub fn slot_upload(&self) -> String {
+        self.slots.upload().to_string()
     }
 
     /// Bounds of the shown slots, `[min x, y, z, max x, y, z]` (ENU metres); empty when none.

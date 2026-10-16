@@ -13,8 +13,12 @@ use std::time::{Duration, Instant};
 pub const CAPTURE_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 
 /// Creates a device on the default (high-performance) adapter without a window.
-/// Returns None when no adapter is available (e.g. CI without a GPU).
+/// Returns None when no adapter is available (e.g. CI without a GPU), or without asking for one
+/// when `PB_NO_GPU=1` is set (GPU tests then skip on a machine whose GPU must not be used).
 pub fn device() -> Option<(wgpu::Device, wgpu::Queue, wgpu::AdapterInfo)> {
+    if std::env::var_os("PB_NO_GPU").is_some_and(|v| v == "1") {
+        return None;
+    }
     let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
     let adapter = pollster_block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
         power_preference: wgpu::PowerPreference::HighPerformance,

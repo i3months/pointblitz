@@ -33,7 +33,9 @@ cumulus3d 0.4.0(`ef0803e`) `--gpu --stable-display --seed 7` 로 theater30 원�
 - 로컬 경로 예: `bench/data/theater30-stable/live/stream/`(gitignore 됨)
 - 시험: `PB_THEATER30_STREAM=<…/live/stream>` 이면 `pointblitz-io` 의 `tests/theater30.rs`(사건마다
   `points = 직전 + add − remove`, `bytes = 20(add+move) + 4·remove`), `pointblitz-core` 의 `tests/slots.rs`
-  (실제 사건 적용 시간)가 돈다. 없으면 건너뛴다.
+  (실제 사건 적용 시간, 방법 (a)·(b) 의 슬롯 버퍼 바이트·화면 일치)가 돈다. 없으면 건너뛴다.
+- (a)·(b) 적용 시간: `pointblitz-bench slot-apply --stream <…/live/stream> --runs 5`(사건마다 apply → GPU 끝,
+  결정 0052 §2).
 - 고정 시점: `bench/viewpoints/theater30-stable.json`(`pointblitz-bench viewpoints <live/stream> …`, 결정 0017 방식으로
   마지막 상태에서 뽑음).
 

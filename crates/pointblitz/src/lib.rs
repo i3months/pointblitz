@@ -15,4 +15,5 @@ pub use pointblitz_io as io;
 
 pub use pointblitz_core::{
     Applied, ApplyError, Camera, GpuTimer, Headless, Inserted, Renderer, Scene, SlotScene,
+    UploadMethod,
 };
