@@ -1,9 +1,11 @@
 //! The point pipeline: one draw per chunk, instanced quads, reversed-Z depth, no sorting
-//! (decisions 0006, 0007, 0013).
+//! (decisions 0006, 0007, 0013). Slot scenes (decision 0052) are one draw each, through the same
+//! shader and size/colour rules.
 
 use crate::camera::Camera;
 use crate::layers::math::fog_params;
 use crate::scene::Scene;
+use crate::slots::{SLOT_BYTES, SlotScene};
 use bytemuck::{Pod, Zeroable};
 
 /// Depth format used by every PointBlitz target.
@@ -32,9 +34,9 @@ struct ChunkUniform {
 }
 
 pub struct Renderer {
-    /// Point pipelines for strides 12 and 8 (decision 0051): opaque, then faded (SkyLens: per-scene
-    /// alpha through the blend constant).
-    pipelines: [wgpu::RenderPipeline; 4],
+    /// Point pipelines for strides 12 and 8 (decision 0051) and slot scenes (stride 16, decision
+    /// 0052): opaque, then faded (SkyLens: per-scene alpha through the blend constant).
+    pipelines: [wgpu::RenderPipeline; 6],
     camera_buf: wgpu::Buffer,
     camera_bg: wgpu::BindGroup,
     chunk_layout: wgpu::BindGroupLayout,
@@ -51,6 +53,13 @@ pub struct Renderer {
     point_m: f32,
     /// Per scene given to the last `prepare`/`render`: first chunk slot and chunks written.
     prepared: Vec<(usize, usize)>,
+    /// Per slot scene given to the last `prepare_with_slots`: its uniform slot.
+    prepared_slots: Vec<usize>,
+}
+
+/// Index into `Renderer::pipelines`: stride 12, 8 or a slot scene, then faded.
+fn pipeline_index(kind: usize, faded: bool) -> usize {
+    kind + 3 * usize::from(faded)
 }
 
 impl Renderer {
@@ -101,6 +110,8 @@ impl Renderer {
         // One pipeline per point stride of chunk format v2 (decision 0051).
         let attrs12 = wgpu::vertex_attr_array![0 => Uint16x4, 1 => Unorm8x4];
         let attrs8 = wgpu::vertex_attr_array![0 => Uint16x4];
+        // Slot scenes: f32 position, then RGB + flags read as integers (bit 0: shown).
+        let attrs16 = wgpu::vertex_attr_array![0 => Float32x3, 1 => Uint8x4];
         let pipeline = |stride: u64,
                         entry: &str,
                         attributes: &[wgpu::VertexAttribute],
@@ -145,11 +156,14 @@ impl Renderer {
                 cache: None,
             })
         };
+        let slot = SLOT_BYTES as u64;
         let pipelines = [
             pipeline(12, "vs12", &attrs12, None),
             pipeline(8, "vs8", &attrs8, None),
+            pipeline(slot, "vs16", &attrs16, None),
             pipeline(12, "vs12", &attrs12, faded),
             pipeline(8, "vs8", &attrs8, faded),
+            pipeline(slot, "vs16", &attrs16, faded),
         ];
 
         let camera_buf = device.create_buffer(&wgpu::BufferDescriptor {
@@ -183,6 +197,7 @@ impl Renderer {
             timestamps: None,
             point_m: 0.0,
             prepared: Vec::new(),
+            prepared_slots: Vec::new(),
         }
     }
 
@@ -232,7 +247,34 @@ impl Renderer {
         camera: &Camera,
         scene: &Scene,
     ) {
-        self.write_frame(device, queue, size, camera, &[scene], None);
+        self.render_with_slots(
+            device,
+            queue,
+            encoder,
+            color,
+            depth,
+            size,
+            camera,
+            &[scene],
+            &[],
+        );
+    }
+
+    /// Like `render`, for chunk scenes and slot scenes (decision 0052) in one pass.
+    #[allow(clippy::too_many_arguments)]
+    pub fn render_with_slots(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
+        color: &wgpu::TextureView,
+        depth: &wgpu::TextureView,
+        size: [u32; 2],
+        camera: &Camera,
+        scenes: &[&Scene],
+        slots: &[&SlotScene],
+    ) {
+        self.write_frame(device, queue, size, camera, scenes, slots, None);
 
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("points"),
@@ -262,11 +304,13 @@ impl Renderer {
             }),
             ..Default::default()
         });
-        self.draw(&mut pass, &[scene], None);
+        self.draw(&mut pass, scenes, None);
+        self.draw_slots(&mut pass, slots, None);
     }
 
     /// Writes the camera uniform and one chunk slot per visible chunk of every scene, scenes in
-    /// order, and remembers each scene's slot range for `draw`.
+    /// order, then one per slot scene, and remembers each scene's slots for `draw` / `draw_slots`.
+    #[allow(clippy::too_many_arguments)]
     fn write_frame(
         &mut self,
         device: &wgpu::Device,
@@ -274,6 +318,7 @@ impl Renderer {
         size: [u32; 2],
         camera: &Camera,
         scenes: &[&Scene],
+        slot_scenes: &[&SlotScene],
         fog: Option<crate::layers::Fog>,
     ) {
         let (w, h) = (size[0].max(1), size[1].max(1));
@@ -291,7 +336,9 @@ impl Renderer {
 
         let counts: Vec<usize> = scenes.iter().map(|s| s.visible_chunks().len()).collect();
         self.prepared = slot_ranges(&counts);
-        let total: usize = counts.iter().sum();
+        let chunks_total: usize = counts.iter().sum();
+        self.prepared_slots = (chunks_total..chunks_total + slot_scenes.len()).collect();
+        let total = chunks_total + slot_scenes.len();
         if total > self.chunk_capacity {
             self.chunk_capacity = total.next_power_of_two();
             (self.chunk_buf, self.chunk_bg) = Self::chunk_slots(
@@ -314,6 +361,17 @@ impl Renderer {
                 scale: [s.x as f32, s.y as f32, s.z as f32, 0.0],
             };
             let at = i * self.chunk_stride as usize;
+            slots[at..at + size_of::<ChunkUniform>()].copy_from_slice(bytemuck::bytes_of(&u));
+        }
+        // Slot scenes: positions are f32 relative to the stream origin, so only the camera offset
+        // (in f64, decision 0013) and a unit scale.
+        for (k, s) in slot_scenes.iter().enumerate() {
+            let d = s.origin() - camera.eye;
+            let u = ChunkUniform {
+                offset: [d.x as f32, d.y as f32, d.z as f32, 0.0],
+                scale: [1.0, 1.0, 1.0, 0.0],
+            };
+            let at = (chunks_total + k) * self.chunk_stride as usize;
             slots[at..at + size_of::<ChunkUniform>()].copy_from_slice(bytemuck::bytes_of(&u));
         }
         if !slots.is_empty() {
@@ -347,7 +405,61 @@ impl Renderer {
         scenes: &[&Scene],
         fog: Option<crate::layers::Fog>,
     ) {
-        self.write_frame(device, queue, size, camera, scenes, fog);
+        self.write_frame(device, queue, size, camera, scenes, &[], fog);
+    }
+
+    /// Like `prepare`, plus slot scenes (decision 0052) for `draw_slots` in the same pass.
+    #[allow(clippy::too_many_arguments)]
+    pub fn prepare_with_slots(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        size: [u32; 2],
+        camera: &Camera,
+        scenes: &[&Scene],
+        slots: &[&SlotScene],
+        fog: Option<crate::layers::Fog>,
+    ) {
+        self.write_frame(device, queue, size, camera, scenes, slots, fog);
+    }
+
+    /// Draws the slot scenes given to the last `prepare_with_slots`, in the same order: one draw of
+    /// `capacity` points each (hidden slots are dropped in the vertex shader). `alpha` as in `draw`.
+    pub fn draw_slots(
+        &self,
+        pass: &mut wgpu::RenderPass<'_>,
+        slots: &[&SlotScene],
+        alpha: Option<&[f32]>,
+    ) {
+        pass.set_bind_group(0, &self.camera_bg, &[]);
+        for (k, s) in slots.iter().enumerate() {
+            let Some(&slot) = self.prepared_slots.get(k) else {
+                break;
+            };
+            let Some(buffer) = s.buffer().filter(|_| s.capacity() > 0) else {
+                continue;
+            };
+            let faded = match fade(alpha, k) {
+                Fade::Skip => continue,
+                Fade::Opaque => false,
+                Fade::Blend(a) => {
+                    let a = f64::from(a);
+                    pass.set_blend_constant(wgpu::Color {
+                        r: a,
+                        g: a,
+                        b: a,
+                        a,
+                    });
+                    true
+                }
+            };
+            pass.set_pipeline(&self.pipelines[pipeline_index(2, faded)]);
+            let at = slot as u64 * self.chunk_stride;
+            pass.set_bind_group(1, &self.chunk_bg, &[at as u32]);
+            let n = s.capacity();
+            pass.set_vertex_buffer(0, buffer.slice(..u64::from(n) * SLOT_BYTES as u64));
+            pass.draw(0..4, 0..n);
+        }
     }
 
     /// Draws the scenes given to the last `prepare`, in the same order, into a caller-owned pass
@@ -378,7 +490,7 @@ impl Renderer {
             // Chunks appended after `prepare` wait for the next frame. Call `prepare` again after a
             // generation swap: until then `draw` uses the old slots for the new chunks.
             for (i, c) in scene.visible_chunks().iter().take(count).enumerate() {
-                let p = usize::from(c.header.stride != 12) + 2 * usize::from(faded);
+                let p = pipeline_index(usize::from(c.header.stride != 12), faded);
                 if bound != Some(p) {
                     pass.set_pipeline(&self.pipelines[p]);
                     bound = Some(p);

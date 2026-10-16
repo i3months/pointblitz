@@ -6,6 +6,9 @@
 //! - the fetch thread takes snapshots in order and streams `/chunks/<seq>`, forwarding every chunk
 //!   as soon as its bytes are complete (decision 0026) — or, with a local data directory (decision
 //!   0050), reads the snapshot's PLY there and converts it in this process, without HTTP.
+//!
+//! A replay server of a slot diff stream (decision 0052) announces `slots` events instead; follow it
+//! with [`spawn_slots`] / [`spawn_slots_cold`], which hand over each event's message whole.
 
 use crate::chunk::{FLAG_LAST_IN_GENERATION, HEADER_LEN, MAGIC, decode_header};
 use std::io::{BufRead, BufReader, Read, Write};
@@ -405,11 +408,250 @@ fn cold(host: String, dir: Option<PathBuf>, send: impl Fn(Msg) + Send + Sync + '
     });
 }
 
+// ---- Slot diff streams (decision 0052) --------------------------------------------------------
+
+/// One event of a slot stream, as announced (`event: slots` on `/events`).
+#[derive(Debug, Clone)]
+pub struct SlotEvent {
+    pub seq: u32,
+    pub kind: String,
+    /// Points shown after the event.
+    pub points: u64,
+    /// Pack bytes (the message is 32 B more).
+    pub bytes: u64,
+}
+
+/// Messages of a slot stream follower to the window thread.
+#[derive(Debug)]
+pub enum SlotMsg {
+    Received {
+        event: SlotEvent,
+        at: Instant,
+    },
+    /// An event's message (or, cold, the folded state) is complete.
+    Message {
+        seq: u32,
+        bytes: Vec<u8>,
+        fetch_start: Instant,
+        /// When its last byte arrived (or it was read from the local directory).
+        at: Instant,
+    },
+    End,
+    Error(String),
+}
+
+pub fn parse_slot_event(json: &str) -> Option<SlotEvent> {
+    let v: serde_json::Value = serde_json::from_str(json).ok()?;
+    Some(SlotEvent {
+        seq: u32::try_from(v["seq"].as_u64()?).ok()?,
+        kind: v["kind"].as_str()?.to_string(),
+        points: v["points"].as_u64()?,
+        bytes: v["bytes"].as_u64()?,
+    })
+}
+
+/// True when the replay server at `host` serves a slot stream (`"stream":"slots"` in its manifest)
+/// rather than snapshots.
+pub fn is_slot_stream(host: &str) -> std::io::Result<bool> {
+    let (_, mut r) = get(host, "/manifest.json")?;
+    let mut text = String::new();
+    r.read_to_string(&mut text)?;
+    let v: serde_json::Value = serde_json::from_str(&text)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+    Ok(v["stream"].as_str() == Some("slots"))
+}
+
+/// Where a slot follower gets messages from: `/slots/…` of the replay server, or the stream
+/// directory on this machine (decision 0050).
+enum SlotSource {
+    Http,
+    Local(crate::slots::dir::StreamDir),
+}
+
+impl SlotSource {
+    fn new(dir: Option<PathBuf>) -> std::io::Result<Self> {
+        Ok(match dir {
+            Some(d) => Self::Local(crate::slots::dir::StreamDir::open(d)?),
+            None => Self::Http,
+        })
+    }
+
+    /// The message of event `seq`, or with `state` everything through it folded.
+    fn fetch(&mut self, host: &str, seq: u32, state: bool) -> std::io::Result<Vec<u8>> {
+        match self {
+            Self::Http => {
+                let path = if state {
+                    format!("/slots/state?seq={seq}")
+                } else {
+                    format!("/slots/{seq}")
+                };
+                let (headers, mut r) = get(host, &path)?;
+                let len = header(&headers, "content-length").and_then(|v| v.parse().ok());
+                let mut bytes = Vec::with_capacity(len.unwrap_or(0));
+                r.read_to_end(&mut bytes)?;
+                crate::slots::validate(&bytes)
+                    .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+                Ok(bytes)
+            }
+            Self::Local(dir) => {
+                if dir.events().iter().all(|e| e.seq != seq) {
+                    dir.refresh()?;
+                }
+                if !state {
+                    return dir.message(seq);
+                }
+                let mut fold = crate::slots::Fold::new();
+                let seqs: Vec<u32> = dir
+                    .events()
+                    .iter()
+                    .map(|e| e.seq)
+                    .filter(|s| *s <= seq)
+                    .collect();
+                for s in seqs {
+                    fold.apply(&dir.message(s)?)
+                        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+                }
+                Ok(fold.message())
+            }
+        }
+    }
+}
+
+/// Fetches announced events strictly in order (a client applies them in `seq` order anyway).
+fn slot_fetch_loop(
+    host: &str,
+    mut source: SlotSource,
+    rx: mpsc::Receiver<SlotEvent>,
+    send: &impl Fn(SlotMsg),
+) {
+    for event in rx {
+        let fetch_start = Instant::now();
+        match source.fetch(host, event.seq, false) {
+            Ok(bytes) => send(SlotMsg::Message {
+                seq: event.seq,
+                bytes,
+                fetch_start,
+                at: Instant::now(),
+            }),
+            Err(e) => send(SlotMsg::Error(format!("event {}: {e}", event.seq))),
+        }
+    }
+    send(SlotMsg::End);
+}
+
+/// Replay of a slot stream: follows `/events?speed=…` and fetches each event's message as it is
+/// announced; with `dir`, the messages are read from the stream directory on this machine instead
+/// of fetched (decision 0050).
+pub fn spawn_slots(
+    host: String,
+    dir: Option<PathBuf>,
+    speed: f64,
+    send: impl Fn(SlotMsg) + Send + Sync + 'static,
+) {
+    let send = std::sync::Arc::new(send);
+    let source = match SlotSource::new(dir) {
+        Ok(s) => s,
+        Err(e) => {
+            send(SlotMsg::Error(format!("stream directory: {e}")));
+            send(SlotMsg::End);
+            return;
+        }
+    };
+    let (tx, rx) = mpsc::channel::<SlotEvent>();
+    let (h2, s2) = (host.clone(), send.clone());
+    std::thread::spawn(move || slot_fetch_loop(&h2, source, rx, &|m| s2(m)));
+    std::thread::spawn(move || {
+        let run = || -> std::io::Result<()> {
+            let (_, r) = get(&host, &format!("/events?speed={speed}"))?;
+            let mut event = String::new();
+            for line in r.lines() {
+                let line = line?;
+                let at = Instant::now();
+                if let Some(e) = line.strip_prefix("event: ") {
+                    event = e.to_string();
+                } else if let Some(data) = line.strip_prefix("data: ") {
+                    match event.as_str() {
+                        "slots" => {
+                            if let Some(ev) = parse_slot_event(data) {
+                                send(SlotMsg::Received {
+                                    event: ev.clone(),
+                                    at,
+                                });
+                                let _ = tx.send(ev);
+                            }
+                        }
+                        "end" => return Ok(()),
+                        _ => {}
+                    }
+                }
+            }
+            Ok(())
+        };
+        if let Err(e) = run() {
+            send(SlotMsg::Error(format!("events: {e}")));
+        }
+    });
+}
+
+/// Cold start of a slot stream: the last event of the manifest, as one folded state.
+pub fn spawn_slots_cold(
+    host: String,
+    dir: Option<PathBuf>,
+    send: impl Fn(SlotMsg) + Send + Sync + 'static,
+) {
+    std::thread::spawn(move || {
+        let run = || -> std::io::Result<()> {
+            let mut source = SlotSource::new(dir)?;
+            let (_, mut r) = get(&host, "/manifest.json")?;
+            let mut text = String::new();
+            r.read_to_string(&mut text)?;
+            let v: serde_json::Value = serde_json::from_str(&text)
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+            let last = v["events"]
+                .as_array()
+                .and_then(|a| a.last())
+                .and_then(|e| parse_slot_event(&e.to_string()))
+                .ok_or_else(|| std::io::Error::other("empty manifest"))?;
+            let seq = last.seq;
+            send(SlotMsg::Received {
+                event: last,
+                at: Instant::now(),
+            });
+            let fetch_start = Instant::now();
+            let bytes = source.fetch(&host, seq, true)?;
+            send(SlotMsg::Message {
+                seq,
+                bytes,
+                fetch_start,
+                at: Instant::now(),
+            });
+            Ok(())
+        };
+        if let Err(e) = run() {
+            send(SlotMsg::Error(format!("cold: {e}")));
+        }
+        send(SlotMsg::End);
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::Point;
     use crate::chunk::encode;
+
+    #[test]
+    fn parses_slot_events() {
+        let e = parse_slot_event(
+            r#"{"seq":6,"time_s":195.83,"t":195.83,"kind":"replace","zone":1,"points":1543927,"n_add":386295,"n_move":264502,"n_remove":395137,"bytes":14596488,"capacity":1939064,"url":"/slots/6"}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            (e.seq, e.kind.as_str(), e.points, e.bytes),
+            (6, "replace", 1_543_927, 14_596_488)
+        );
+        assert!(parse_slot_event(r#"{"seq":1}"#).is_none());
+    }
 
     #[test]
     fn reads_back_to_back_chunks_until_the_end() {

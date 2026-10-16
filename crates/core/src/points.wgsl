@@ -2,6 +2,8 @@
 // One instance per point (the chunk body), four vertices per instance (triangle strip).
 // Chunk format v2 (decision 0051): positions are u16×3 quantised to the chunk's bounding box; the
 // colour is RGBA8 (stride 12, entry vs12) or RGB565 in the fourth u16 (stride 8, entry vs8).
+// Slot scenes (decision 0052, entry vs16): f32×3 relative to the stream origin, then RGB8 and a
+// flags byte (bit 0: shown) — one instance per slot, hidden slots are sent outside the clip volume.
 // SkyLens: color.wgsl is prepended (fog); sizes may be world metres with perspective attenuation.
 
 struct Camera {
@@ -20,8 +22,9 @@ struct Camera {
 
 struct Chunk {
     // Chunk origin + bounding-box minimum − camera position (computed in f64 on the CPU).
+    // Slot scene: stream origin − camera position.
     offset: vec4<f32>,
-    // Bounding-box size ÷ 65535: metres per quantisation step, per axis.
+    // Bounding-box size ÷ 65535: metres per quantisation step, per axis. Slot scene: 1.
     scale: vec4<f32>,
 };
 
@@ -37,10 +40,10 @@ struct VsOut {
     @location(3) fog: vec4<f32>,
 };
 
-fn place(vi: u32, q: vec3<u32>, color: vec4<f32>) -> VsOut {
+// `position`: camera-relative metres.
+fn place(vi: u32, position: vec3<f32>, color: vec4<f32>) -> VsOut {
     // Strip order: (-1,-1) (1,-1) (-1,1) (1,1).
     let corner = vec2<f32>(f32(vi & 1u) * 2.0 - 1.0, f32(vi >> 1u) * 2.0 - 1.0);
-    let position = chunk.offset.xyz + vec3<f32>(q) * chunk.scale.xyz;
     var clip = cam.view_proj * vec4<f32>(position, 1.0);
     // clip.w is the view depth. World-sized points shrink with distance (three.js
     // sizeAttenuation); clamped so a point next to the eye cannot cover the screen.
@@ -64,7 +67,27 @@ fn vs12(
     @location(0) q: vec4<u32>,
     @location(1) color: vec4<f32>,
 ) -> VsOut {
-    return place(vi, q.xyz, color);
+    return place(vi, dequantise(q.xyz), color);
+}
+
+fn dequantise(q: vec3<u32>) -> vec3<f32> {
+    return chunk.offset.xyz + vec3<f32>(q) * chunk.scale.xyz;
+}
+
+@vertex
+fn vs16(
+    @builtin(vertex_index) vi: u32,
+    @location(0) p: vec3<f32>,
+    @location(1) c: vec4<u32>,
+) -> VsOut {
+    if (c.w & 1u) == 0u {
+        // Hidden slot: all four corners on one point outside the clip volume, nothing rasterised.
+        var out: VsOut;
+        out.clip = vec4<f32>(0.0, 0.0, -2.0, 1.0);
+        return out;
+    }
+    let color = vec4<f32>(vec3<f32>(c.xyz) / 255.0, 1.0);
+    return place(vi, chunk.offset.xyz + p * chunk.scale.xyz, color);
 }
 
 @vertex
@@ -79,7 +102,7 @@ fn vs8(
         f32(c & 31u) / 31.0,
         1.0,
     );
-    return place(vi, q.xyz, color);
+    return place(vi, dequantise(q.xyz), color);
 }
 
 @fragment

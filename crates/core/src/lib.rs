@@ -8,6 +8,7 @@ pub mod headless;
 pub mod layers;
 pub mod renderer;
 pub mod scene;
+pub mod slots;
 pub mod timer;
 
 pub use camera::Camera;
@@ -18,4 +19,5 @@ pub use layers::{
 };
 pub use renderer::{PointSize, Renderer};
 pub use scene::{Inserted, Scene};
+pub use slots::{Applied, ApplyError, SlotScene};
 pub use timer::GpuTimer;

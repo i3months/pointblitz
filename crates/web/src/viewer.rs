@@ -1,9 +1,10 @@
-//! The browser viewer: a WebGPU surface on a canvas around the core `Scene` and `Renderer`.
+//! The browser viewer: a WebGPU surface on a canvas around the core `Scene` and `Renderer`, plus a
+//! `SlotScene` for slot diff streams (decision 0052).
 
 use crate::json_str;
 use crate::oneshot::Signal;
 use pointblitz_core::renderer::DEPTH_FORMAT;
-use pointblitz_core::{Camera, GpuTimer, Inserted, Renderer, Scene};
+use pointblitz_core::{Applied, Camera, GpuTimer, Inserted, Renderer, Scene, SlotScene};
 use std::cell::RefCell;
 use std::rc::Rc;
 use wasm_bindgen::prelude::*;
@@ -17,6 +18,8 @@ pub struct Viewer {
     depth: wgpu::TextureView,
     renderer: Renderer,
     scene: Scene,
+    /// Points of a slot diff stream (decision 0052); empty when following snapshots.
+    slots: SlotScene,
     camera: Camera,
     adapter: String,
     /// Offscreen target of the canvas size and format for synchronised frames (orbit).
@@ -153,6 +156,8 @@ impl Viewer {
             depth,
             renderer,
             scene: Scene::new(),
+            // cumulus3d's `enu` frame: slot positions are metres from ENU 0.
+            slots: SlotScene::new([0.0; 3]),
             camera: Camera::new([0.0, -10.0, 10.0], [0.0; 3], [0.0, 0.0, 1.0], 50.0),
             adapter,
             offscreen: None,
@@ -182,6 +187,38 @@ impl Viewer {
             Inserted::Stale => "stale",
         }
         .into())
+    }
+
+    /// Applies one slot diff message (decision 0052) whole: every record is on screen from the next
+    /// frame. Returns `{"applied":[seq, …]}` (with held messages that followed it), `held` (a seq
+    /// is missing before it) or `stale`.
+    pub fn apply_slots(&mut self, message: &[u8]) -> Result<String, JsValue> {
+        let r = self
+            .slots
+            .apply(&self.device, &self.queue, message)
+            .map_err(|e| err("slots", e))?;
+        Ok(match r {
+            Applied::Shown(seqs) => format!("{{\"applied\":{seqs:?}}}"),
+            Applied::Held => "held".into(),
+            Applied::Stale => "stale".into(),
+        })
+    }
+
+    /// Empties the slot scene, e.g. before applying a folded state.
+    pub fn clear_slots(&mut self) {
+        self.slots.clear();
+    }
+
+    /// GPU bytes the last `apply_slots` wrote (the changed slot range).
+    pub fn slot_upload_bytes(&self) -> f64 {
+        self.slots.last_upload_bytes() as f64
+    }
+
+    /// Bounds of the shown slots, `[min x, y, z, max x, y, z]` (ENU metres); empty when none.
+    pub fn slot_bounds(&self) -> Vec<f64> {
+        self.slots
+            .bounds()
+            .map_or(Vec::new(), |(lo, hi)| lo.into_iter().chain(hi).collect())
     }
 
     pub fn set_camera(&mut self, eye: &[f64], target: &[f64], up: &[f64], fov_y_deg: f64) {
@@ -238,7 +275,7 @@ impl Viewer {
         {
             t.next(&mut self.renderer);
         }
-        self.renderer.render(
+        self.renderer.render_with_slots(
             &self.device,
             &self.queue,
             &mut enc,
@@ -246,7 +283,8 @@ impl Viewer {
             &self.depth,
             [w, h],
             &self.camera,
-            &self.scene,
+            &[&self.scene],
+            &[&self.slots],
         );
         let t1 = now();
         if self.readback_copy {
@@ -362,7 +400,7 @@ impl Viewer {
         let mut enc = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
-        self.renderer.render(
+        self.renderer.render_with_slots(
             &self.device,
             &self.queue,
             &mut enc,
@@ -370,7 +408,8 @@ impl Viewer {
             &self.depth,
             [self.config.width, self.config.height],
             &self.camera,
-            &self.scene,
+            &[&self.scene],
+            &[&self.slots],
         );
         self.queue.submit([enc.finish()]);
         self.queue.present(frame);
@@ -395,13 +434,13 @@ impl Viewer {
         let _ = self.device.poll(wgpu::PollType::Poll);
     }
 
-    /// Points on screen.
+    /// Points on screen (chunks and slots).
     pub fn points(&self) -> f64 {
-        self.scene.points() as f64
+        (self.scene.points() + self.slots.points()) as f64
     }
 
-    /// Vertex buffer bytes on the GPU (shown + pending generations).
+    /// Vertex buffer bytes on the GPU (shown + pending generations, slot buffer).
     pub fn gpu_bytes(&self) -> f64 {
-        self.scene.gpu_bytes() as f64
+        (self.scene.gpu_bytes() + self.slots.gpu_bytes()) as f64
     }
 }

@@ -139,19 +139,45 @@ pub fn coverage(v: &Viewpoint, points: &[[f32; 3]]) -> (f64, f64) {
     )
 }
 
-pub fn run(input: &str, output: &str) -> Result<(), String> {
+/// Positions of a PLY, or of a v4 slot stream directory's last state (decision 0052), and a name
+/// for the source.
+fn load_points(input: &str) -> Result<(Vec<[f32; 3]>, String), String> {
+    let path = std::path::Path::new(input);
+    if path.is_dir() {
+        use pointblitz_io::slots::{Diff, Fold, dir::StreamDir};
+        let mut s = StreamDir::open(path).map_err(|e| format!("{input}: {e}"))?;
+        let mut fold = Fold::new();
+        for (_, m) in s.messages().map_err(|e| format!("{input}: {e}"))? {
+            fold.apply(&m).map_err(|e| format!("{input}: {e}"))?;
+        }
+        let state = fold.message();
+        let pts = Diff::parse(&state)
+            .map_err(|e| e.to_string())?
+            .add_records()
+            .map(|r| r.position)
+            .collect();
+        return Ok((
+            pts,
+            format!("slot stream, state through seq {}", fold.seq()),
+        ));
+    }
     let bytes = std::fs::read(input).map_err(|e| format!("{input}: {e}"))?;
-    let pts: Vec<[f32; 3]> = pointblitz_io::points(&bytes)
+    let pts = pointblitz_io::points(&bytes)
         .map_err(|e| format!("{input}: {e}"))?
         .map(|p| p.position)
         .collect();
+    let source = path
+        .file_name()
+        .map_or(input.into(), |n| n.to_string_lossy().into_owned());
+    Ok((pts, source))
+}
+
+pub fn run(input: &str, output: &str) -> Result<(), String> {
+    let (pts, source) = load_points(input)?;
     let b = robust_bounds(&pts);
     let views = derive(&b, densest_point(&pts, &b));
 
     let mut json = String::new();
-    let source = std::path::Path::new(input)
-        .file_name()
-        .map_or(input.into(), |n| n.to_string_lossy());
     writeln!(json, "{{").unwrap();
     writeln!(json, "  \"source\": \"{}\",", json_escape(&source)).unwrap();
     writeln!(json, "  \"points\": {},", pts.len()).unwrap();

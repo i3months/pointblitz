@@ -121,6 +121,20 @@ target/release/pointblitz-bench replay --data <ply dir> --web . --port 8700
 Everywhere: drag to orbit, wheel to zoom, keys 1–8 for the fixed viewpoints. `speed` is the replay speed factor
 (60 = snapshots made 97–2,053 s into the flight, replayed from the first one in about 32.6 s).
 
+**Slot diff stream (unreleased, decision [0052](docs/decisions/0052-slot-diff-stream.md)).** The replay server also
+replays a cumulus3d 0.4.0 `--stable-display` live stream (`<out>/live/stream`, format v4), where every point has a
+fixed slot id and each event carries only the points added, moved and removed:
+
+```sh
+target/release/pointblitz-bench replay --stream <out>/live/stream --web . --port 8700
+```
+
+The same three clients recognise it from the manifest and apply each event whole to a slot scene
+(`SlotScene`); add `&viewpoints=bench/viewpoints/theater30-stable.json` (browser) or
+`--viewpoints bench/viewpoints/theater30-stable.json` (native, server video) for the theater30 viewpoints —
+without them the browser and native viewers frame the first state. The server video reads the stream directory
+itself with `--data <out>/live/stream`. This path has not been measured yet.
+
 Server video options and limits (decision 0042):
 
 - Frames are sent the moment they are encoded; on a 60 Hz display 2 of 5 rotation runs still showed an occasional
@@ -173,6 +187,8 @@ PointBlitz 는 Rust + wgpu 로 만드는 점군 렌더러입니다. 같은 렌�
 설치: `cargo add pointblitz`(라이브러리), `cargo install pointblitz-native`(창 뷰어), `cargo install pointblitz-server`(서버 영상, NVIDIA GPU·드라이버 필요, Windows·Linux) — crates.io 0.2.1, Rust 1.99 이상. 브라우저 모듈은 crates.io 가 아니라 저장소에서 `bash web/build.sh` 로 빌드합니다.
 
 직접 돌려 보려면 위 [Try it](#try-it) 를 보세요 — 재생 서버를 띄운 뒤 브라우저·native·서버 영상 중 하나로 봅니다(드래그 회전, 휠 확대, 1–8 고정 시점). 서버 영상은 Windows 또는 Linux + NVIDIA GPU(드라이버의 NVENC)가 필요하고, `--phase-lock on` 은 클라이언트 하나·60 Hz 화면에서만 맞으며(기본 끔), 영상 페이지의 `?pacing=adaptive` 는 한 프레임을 쌓아 두어 프레임 간격을 고르게 합니다(지연 최대 한 프레임) — 60 Hz 가 아닌 화면을 위한 것이지만 그런 화면에서는 재 보지 않았습니다.
+
+**슬롯 차분 스트림(미배포, [결정 0052](docs/decisions/0052-slot-diff-stream.md))**: 재생 서버는 `replay --stream <out>/live/stream` 으로 cumulus3d 0.4.0 `--stable-display` 의 라이브 스트림(v4, 점마다 고정 슬롯 id, 사건마다 추가·이동·삭제만)도 재생합니다. 세 클라이언트는 매니페스트로 이를 알아보고 사건마다 메시지를 통째로 슬롯 장면(`SlotScene`)에 적용합니다. 아직 측정하지 않았습니다.
 
 ## License
 

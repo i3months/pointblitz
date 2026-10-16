@@ -7,6 +7,7 @@
 use crate::camera::Camera;
 use crate::renderer::{DEPTH_FORMAT, Renderer};
 use crate::scene::Scene;
+use crate::slots::SlotScene;
 use std::time::{Duration, Instant};
 
 pub const CAPTURE_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
@@ -118,11 +119,23 @@ impl Headless {
         camera: &Camera,
         scene: &Scene,
     ) -> FrameTiming {
+        self.render_with_slots(device, queue, camera, &[scene], &[])
+    }
+
+    /// Like `render`, for chunk scenes and slot scenes (decision 0052).
+    pub fn render_with_slots(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        camera: &Camera,
+        scenes: &[&Scene],
+        slots: &[&SlotScene],
+    ) -> FrameTiming {
         let t0 = Instant::now();
         let mut encoder = device.create_command_encoder(&Default::default());
         let cv = self.color.create_view(&Default::default());
         let dv = self.depth.create_view(&Default::default());
-        self.renderer.render(
+        self.renderer.render_with_slots(
             device,
             queue,
             &mut encoder,
@@ -130,7 +143,8 @@ impl Headless {
             &dv,
             self.size,
             camera,
-            scene,
+            scenes,
+            slots,
         );
         let index = queue.submit([encoder.finish()]);
         let cpu = t0.elapsed();
@@ -155,6 +169,19 @@ impl Headless {
         scene: &Scene,
     ) -> Vec<u8> {
         self.render(device, queue, camera, scene);
+        self.read_back(device, queue)
+    }
+
+    /// Like `capture`, for chunk scenes and slot scenes (decision 0052).
+    pub fn capture_with_slots(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        camera: &Camera,
+        scenes: &[&Scene],
+        slots: &[&SlotScene],
+    ) -> Vec<u8> {
+        self.render_with_slots(device, queue, camera, scenes, slots);
         self.read_back(device, queue)
     }
 

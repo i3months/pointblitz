@@ -18,5 +18,9 @@ glam = "0.34"
 pointblitz-io.workspace = true
 wgpu = "30.0.1"
 
+[dev-dependencies]
+# The real-data slot test reads a v4 stream directory (decision 0052); the core itself does not.
+pointblitz-io = { workspace = true, features = ["stream"] }
+
 [lints]
 workspace = true
