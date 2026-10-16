@@ -19,6 +19,8 @@ pointblitz-io.workspace = true
 [features]
 # The replay-server client in pointblitz-io (std::net), off by default (decision 0003).
 client = ["pointblitz-io/client"]
+# Reading a cumulus3d v4 `live/stream` directory (`io::slots::dir`, decision 0052), off by default.
+stream = ["pointblitz-io/stream"]
 
 [lints]
 workspace = true

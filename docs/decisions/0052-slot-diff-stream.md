@@ -28,6 +28,7 @@
 
 ### 3. 전달
 - `pointblitz-io`: `slots` 모듈 — 머리 인코드·디코드, v4 디렉터리 읽기(`manifest.json` 을 따라가며 새 사건의 팩을 내놓음), 레코드 검사(id < capacity, 길이 = 20(add+move) + 4·remove).
+- 재생 서버는 이 저장소의 재생 서버인 `pointblitz-bench replay --stream <dir>`([0018](0018-replay-server.md))다(PR #94 에서 위치 확인). `pointblitz-server` 는 서버 영상으로서 같은 스트림을 따라간다.
 - `pointblitz-server` 재생 서버: `--stream <live/stream 디렉터리>` 로 v4 사건을 원래 시각(`t`)대로 알리고, `/slots/<seq>` 로 차분 메시지를, `/slots/state` 로 지금까지를 합친 하나의 메시지(새로 붙는 클라이언트용)를 보낸다. 서버 영상은 같은 디렉터리를 같은 장비에서 직접 읽는다(0050).
 - 브라우저(web)·native 클라이언트는 알림을 받으면 그 사건의 메시지를 받아 `SlotScene` 에 적용한다.
 
@@ -40,6 +41,11 @@
 - as-is: SkyLens 식 three.js 가 같은 v4 차분을 적용(`BufferAttribute` 칸 덮어쓰기 + `addUpdateRange`, remove 는 칸 숨김) — 증분 구조에서 three.js 로 할 수 있는 가장 나은 방식. 참고로 "구역 통째 교체"(지금 SkyLens, pointblitz 0.2.1)도 같은 사건으로 잰다.
 - to-be: 브라우저 WebGPU · webgl · native · 서버 영상.
 - 지표: 사건 반영(`event_latency` = 사건 알림 → 그 사건 레코드가 모두 보이는 첫 프레임, 사건 종류별), 받은 바이트, 마지막 288만 점에서 그리기 시간(orbit, batch 30), 메인 스레드 멈춤, mem_cpu. 목표 수치는 측정 계획 문서에서 측정 전에 정한다.
+
+## 구현 메모(PR #94)
+- **사건별 capacity**: v4 `manifest.json` 에는 마지막 capacity 만 있다. 메시지 머리의 capacity(이 사건 뒤)는 그 사건까지 add id 의 최댓값 + 1 로 계산한다(cumulus3d 의 `capacity++` 규칙과 같음, theater30 에서 마지막 값이 매니페스트의 2,881,929 와 같다).
+- **`/slots/state` 는 `seq` 가 필수**(`?seq=N`, 없으면 400): 재생 서버는 `/events` 구독마다 시계가 따로라 "지금까지" 는 클라이언트가 정한다.
+- **접은 상태 = `clear()` 뒤 적용**: 접은 상태는 add 만 있는 보통 메시지라 머리에 표시가 없다. 클라이언트가 `SlotScene::apply_state`(장면을 비우고 그 seq 부터 시작, 보관 중인 뒤 사건은 이어서 적용)로 적용한다. 새 장면은 seq 1 또는 접은 상태로만 시작한다(`expect` 로 명시할 수 있다). 사건 메시지를 몇 번 다시 받아도 못 받으면 그 사건까지 접은 상태로 대신한다.
 
 ## 대가
 - 차분은 바이트가 더 많다(이 실행 125.4 MB, 통째 한 번의 2.2 배). replace 의 move 가 크기 때문이다. 대역폭은 제약이 아니다(INTENT 원칙 2).

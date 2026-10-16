@@ -1,10 +1,11 @@
 //! PointBlitz scenario replay and metrics.
 //!
 //! Subcommands:
-//! - `viewpoints <final.ply> <out.json>`: derives the 8 fixed viewpoints (decision 0017) and
+//! - `viewpoints <final.ply | stream dir> <out.json>`: derives the 8 fixed viewpoints (decision 0017) and
 //!   checks that each one sees the cloud.
 //! - `replay --data <dir> [--web <dir>] [--port N]`: serves a snapshot dataset and announces
-//!   snapshots at their original times (decision 0018).
+//!   snapshots at their original times (decision 0018). `--stream <dir>` instead of `--data`: a
+//!   cumulus3d v4 slot diff stream, announced the same way (decision 0052).
 //! - `capture --ply <file> --viewpoints <json> --out <dir>`: PointBlitz captures at the fixed viewpoints.
 //! - `compare <dir A> <dir B> [--viewpoints <json>] [--md <file>]`: SSIM and coverage per viewpoint.
 
@@ -12,14 +13,15 @@ mod capture;
 mod chunks;
 mod image;
 mod replay;
+mod slots;
 mod ssim;
 mod viewpoints;
 
 use std::process::ExitCode;
 
 const USAGE: &str = "usage:
-  pointblitz-bench viewpoints <final.ply> <out.json>
-  pointblitz-bench replay --data <dir> [--web <dir>] [--port 8700]
+  pointblitz-bench viewpoints <final.ply | live/stream dir> <out.json>
+  pointblitz-bench replay --data <dir> | --stream <live/stream dir> [--web <dir>] [--port 8700]
   pointblitz-bench capture --ply <file> --viewpoints <json> --out <dir>
   pointblitz-bench compare <dir A> <dir B> [--viewpoints <json>] [--md <file>]";
 

@@ -9,7 +9,7 @@
 
 | 구분 | 내용 |
 |---|---|
-| 입력 | skyrecon 점군 PLY(§2) |
+| 입력 | skyrecon 점군 PLY(§2). cumulus3d 0.4.0 `--stable-display` 의 슬롯 차분 스트림 v4(`live/stream`, [0052](docs/decisions/0052-slot-diff-stream.md)) |
 | 실행 위치 | 브라우저(wasm), 네이티브 창, 서버(헤드리스 렌더 + 영상 전송) — 같은 렌더 코어 |
 | 비교 기준 | 같은 PLY 를 three.js 로 그리는 기존 방식(§5) |
 | 결과물 | Rust 크레이트, wasm 패키지, 서버 실행 파일, 비교표와 하드웨어 비용 모델, 재현 스크립트 |
@@ -108,6 +108,7 @@ PLY / 청크 ────► │ chunk store(append·replace·세대) → GPU �
 |---|---|---|
 | 기존 방식 | PLY 정적 서빙 | 이벤트마다 PLY 전체 |
 | 브라우저 · 네이티브 | PLY → GPU 레이아웃 청크 변환. preview 는 새 점만, refined 는 새 세대 전체(거친 것 먼저, [0051](docs/decisions/0051-fewer-bytes-coarse-first.md)) | GPU 가 해석 없이 그대로 쓰는 청크([0008](docs/decisions/0008-gpu-ready-uncompressed-chunks.md)), 좌표는 청크 경계 상자 기준 16 비트([0051](docs/decisions/0051-fewer-bytes-coarse-first.md)) |
+| 브라우저 · 네이티브(슬롯 차분, [0052](docs/decisions/0052-slot-diff-stream.md)) | v4 팩 앞에 32 B 머리만 붙임(변환 없음). 사건마다 차분, 새로 붙는 클라이언트에는 지금까지를 합친 하나 | 슬롯 id 칸에 그대로 쓰는 레코드(f32 좌표, 장면 원점 기준). 한 사건은 한 프레임에 모두 적용 |
 | 서버 영상 | 서버 GPU 렌더 → 하드웨어 인코딩 | H.264 영상 프레임(WebSocket + WebCodecs), 입력은 역방향 전송([0010](docs/decisions/0010-server-video-transport.md)) |
 
 ### 3.4 좌표 규약
@@ -129,6 +130,14 @@ scene.render(&mut encoder, &target, &camera);
 
 - 세대(generation)를 바꾸는 동안 이전 세대를 계속 그린다(빈 화면 없음).
 - wasm·Python 바인딩은 같은 개념(`begin_generation`, `append`, `commit`, `render`)을 그대로 노출한다.
+
+슬롯 차분 스트림([0052](docs/decisions/0052-slot-diff-stream.md))은 장면 종류가 따로다. 세대 장면과 같은 패스에 그린다.
+
+```rust
+let mut slots = SlotScene::new(origin);       // 스트림 원점(ENU, f64)
+slots.apply(&device, &queue, &message)?;      // 사건 하나를 통째로: add·move 는 칸을 쓰고 보임, remove 는 숨김
+renderer.render_with_slots(&device, &queue, &mut encoder, &color, &depth, size, &camera, &[&scene], &[&slots]);
+```
 
 ## 5. 기준 방식 (기존 방식 재현)
 
@@ -282,3 +291,4 @@ PointBlitz 를 재기 전에 정했다. 근거·이유: [docs/ops/reviews/p0-7-t
 | 2026-10-08 | §7.1 서버 영상(P3) 목표 추가(제안 그대로, 화질은 native 캡처 대비), 프레임 빠짐 정의 | 프로젝트 소유자(채팅) |
 | 2026-10-08 | §7.1 `frame_time_total` 기준값 정정 2.8 / 3.8 / 6.0 → 1.7 / 1.9 / 2.0 ms(기준 방식 재측정 2, C1–C4 준수, 밉맵 끔). 이유: 기준 측정 유효성 정정 — P0.6 원 측정은 C3 범위 밖 11/14·C4 미상. 판정 이력은 문서에 보존(docs/bench/baseline-three.md, validity-audit.md), 판정은 P4.6 C1–C4 전체 비교에서 새 기준으로. §7.1 에 판정 유효성(C1–C4) 문구 추가 | 감독(소유자 위임 2026-10-08) — 기준 측정 유효성 정정 |
 | 2026-10-09 | §6.2 `event_first_latency`("첫 반영") 추가, `event_latency` 는 "완전 반영" 으로 이름만 붙임(정의 그대로). §7.1 목표 두 줄 추가: browser(WebGPU)·서버 영상 정밀 첫 반영 p50 ≤ 50 ms. §3.3 청크를 좌표 16 비트·거친 것 먼저로(결정 0051) | 소유자(③·④ 허용, 채팅) · 감독(목표 값, 측정 전 고정) |
+| 2026-10-16 | §1 입력에 cumulus3d v4 슬롯 차분 스트림, §3.3 슬롯 차분 행, §4 `SlotScene` 추가(결정 0052 의 구현을 적음, §6·§7 은 그대로 — 측정 계획은 따로) | 소유자(결정 0052 승인) · 작업자(문구) |

@@ -12,6 +12,9 @@
 //! - `GET /data/<file>?have=<generation>.<points>` — the PLY, or its header + appended records only
 //!   (B2 baseline, decision 0048).
 //! - `GET /static/<path>` — files under the web root (baseline pages).
+//!
+//! With `--stream <dir>` instead of `--data <dir>` it replays a cumulus3d v4 slot diff stream
+//! (decision 0052, `slots.rs`).
 
 use pointblitz_io::convert::Conversion;
 use std::io::{BufRead, BufReader, Read, Write};
@@ -104,14 +107,20 @@ pub fn scan(dir: &Path) -> Result<Vec<Event>, String> {
 
 /// When each event is sent, relative to the moment the client subscribes.
 pub fn schedule(events: &[Event], speed: f64, start_at_first: bool) -> Vec<Duration> {
+    let times: Vec<f64> = events.iter().map(|e| e.time_s).collect();
+    schedule_times(&times, speed, start_at_first)
+}
+
+/// [`schedule`] for event times in seconds (also the slot stream's `t`, decision 0052).
+pub fn schedule_times(times: &[f64], speed: f64, start_at_first: bool) -> Vec<Duration> {
     let origin = if start_at_first {
-        events.first().map_or(0.0, |e| e.time_s)
+        times.first().copied().unwrap_or(0.0)
     } else {
         0.0
     };
-    events
+    times
         .iter()
-        .map(|e| Duration::from_secs_f64(((e.time_s - origin) / speed).max(0.0)))
+        .map(|t| Duration::from_secs_f64(((t - origin) / speed).max(0.0)))
         .collect()
 }
 
@@ -258,12 +267,14 @@ fn prepare(server: &Server, idx: usize) {
 
 pub fn run(args: &[String]) -> Result<(), String> {
     let mut data = None;
+    let mut stream = None;
     let mut web = None;
     let mut port = 8700u16;
     let mut it = args.iter();
     while let Some(a) = it.next() {
         match a.as_str() {
             "--data" => data = it.next().map(PathBuf::from),
+            "--stream" => stream = it.next().map(PathBuf::from),
             "--web" => web = it.next().map(PathBuf::from),
             "--port" => {
                 port = it
@@ -274,7 +285,15 @@ pub fn run(args: &[String]) -> Result<(), String> {
             other => return Err(format!("unknown argument {other}")),
         }
     }
-    let data = data.ok_or("--data <dir> is required")?;
+    // --stream: a cumulus3d v4 slot diff stream instead of snapshot PLYs (decision 0052).
+    match (data, stream) {
+        (None, Some(stream)) => crate::slots::run(stream, web, port),
+        (Some(data), None) => run_snapshots(data, web, port),
+        _ => Err("one of --data <dir> or --stream <dir> is required".into()),
+    }
+}
+
+fn run_snapshots(data: PathBuf, web: Option<PathBuf>, port: u16) -> Result<(), String> {
     let events = scan(&data)?;
     // Checked once on the bytes at startup and treated as snapshot metadata (decision 0026): the
     // producer knows whether it appended, so this is not part of the per-request work.
@@ -466,7 +485,7 @@ fn serve_chunks(
     Ok(())
 }
 
-fn serve_file(stream: &mut TcpStream, path: &Path) -> std::io::Result<()> {
+pub(crate) fn serve_file(stream: &mut TcpStream, path: &Path) -> std::io::Result<()> {
     let mut file = std::fs::File::open(path)?;
     let len = file.metadata()?.len();
     let ty = match path.extension().and_then(|e| e.to_str()) {
@@ -528,9 +547,15 @@ fn serve_data_have(
     stream.flush()
 }
 
-fn respond(stream: &mut TcpStream, code: u16, ty: &str, body: &[u8]) -> std::io::Result<()> {
+pub(crate) fn respond(
+    stream: &mut TcpStream,
+    code: u16,
+    ty: &str,
+    body: &[u8],
+) -> std::io::Result<()> {
     let reason = match code {
         200 => "OK",
+        400 => "Bad Request",
         204 => "No Content",
         404 => "Not Found",
         _ => "Method Not Allowed",

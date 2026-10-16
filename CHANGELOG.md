@@ -3,6 +3,34 @@
 All six crates (`pointblitz`, `pointblitz-core`, `pointblitz-io`, `pointblitz-native`, `pointblitz-server`,
 `pointblitz-web`) share one version.
 
+## Unreleased
+
+Additions only: 0.2.1 code builds unchanged, and the chunk format (v2) and the snapshot path are as before.
+Slot diff streams (decision 0052): cumulus3d 0.4.0's `--stable-display` live stream (format v4), where every point
+owns a fixed slot id and each event carries only the points added, moved and removed.
+
+- `pointblitz-io`: `slots` — the slot diff message (32-byte header `PBSD` v1 + the v4 records unchanged), encode,
+  decode and validation (lengths, every id below the capacity), `Diff` (the three sections as records), `Fold`
+  (all messages so far as one, for a client that joins late). `slots::dir` (new cargo feature `stream`) reads a
+  v4 `live/stream` directory in `seq` order, with the per-event capacity. `client`: `spawn_slots`,
+  `spawn_slots_cold`, `is_slot_stream`.
+- `pointblitz-core`: `SlotScene` — one GPU buffer, 16 bytes per slot (f32 position relative to the stream origin,
+  RGB, flags); `apply` puts a whole message on screen from the next frame (records into a CPU mirror, then one
+  `write_buffer` of the changed range — every backend, WebGL2 included), starts at seq 1 (or at a folded state,
+  `apply_state`, or an explicit `expect`), holds a message whose predecessor is missing, drops old ones, doubles
+  the buffer with a GPU copy when the capacity grows. Clients retry an event they cannot fetch and then fall
+  back to the folded state through it. Drawn by the existing point
+  pipeline with the same size and colour rules, hidden slots dropped in the vertex shader:
+  `Renderer::prepare_with_slots` / `draw_slots` / `render_with_slots`, `Headless::capture_with_slots` (the 0.2.1
+  calls are unchanged).
+- Replay server: `pointblitz-bench replay --stream <dir>` announces the events at their original times
+  (`event: slots`), serves `/slots/<seq>` and `/slots/state?seq=N` (folded); `pointblitz-bench viewpoints` takes a
+  stream directory. `bench/viewpoints/theater30-stable.json`.
+- Native viewer, browser (`apply_slots`, `slot_bounds`, …) and server video follow such a server and apply each
+  event whole; the server video reads the stream directory itself with `--data` (decision 0050).
+- `pointblitz`: re-exports `SlotScene`, `Applied`, `ApplyError`; new feature `stream`.
+- Not measured yet (decision 0052 §5); the compute-shader upload, method (b), is not implemented.
+
 ## 0.2.1 — 2026-10-16
 
 Additions only; 0.2.0 code builds unchanged and the chunk format is still v2.

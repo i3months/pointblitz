@@ -19,10 +19,15 @@
 //! fixed viewpoint into an offscreen target of the window's size and format (like the baseline's
 //! un-presented canvas frames): `sync_frame` lines with `cpu` (encode + submit) and `ms` (until the
 //! GPU is done).
+//!
+//! A replay server of a slot diff stream (`replay --stream`, decision 0052) is recognised from its
+//! manifest: each announced event's message is fetched and applied to a `SlotScene` whole, then
+//! marked like a snapshot (`snapshot_received`, `delivered`, `uploaded`, `submitted`, `presented`).
+//! Without `--viewpoints` the camera then frames the first state it gets.
 
 use pointblitz_core::renderer::DEPTH_FORMAT;
-use pointblitz_core::{Camera, GpuTimer, Inserted, Renderer, Scene};
-use pointblitz_io::client::{self as net, Msg};
+use pointblitz_core::{Applied, Camera, GpuTimer, Inserted, Renderer, Scene, SlotScene};
+use pointblitz_io::client::{self as net, Msg, SlotMsg};
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::sync::Arc;
@@ -53,6 +58,15 @@ struct Args {
     memory_hints: wgpu::MemoryHints,
     /// Draw every frame (A/B) instead of only when something changed.
     continuous: bool,
+    /// `--viewpoints` was given (otherwise a slot stream frames its first state).
+    viewpoints_given: bool,
+}
+
+/// What the network threads send to the window thread.
+#[derive(Debug)]
+enum Net {
+    Chunks(Msg),
+    Slots(SlotMsg),
 }
 
 fn parse_args() -> Result<Args, String> {
@@ -70,6 +84,7 @@ fn parse_args() -> Result<Args, String> {
         batch: 1,
         memory_hints: wgpu::MemoryHints::MemoryUsage,
         continuous: false,
+        viewpoints_given: false,
     };
     let mut it = std::env::args().skip(1);
     while let Some(k) = it.next() {
@@ -78,7 +93,10 @@ fn parse_args() -> Result<Args, String> {
             "--server" => a.server = val()?,
             "--scenario" => a.scenario = val()?,
             "--speed" => a.speed = val()?.parse().map_err(|_| "--speed")?,
-            "--viewpoints" => a.viewpoints = val()?,
+            "--viewpoints" => {
+                a.viewpoints = val()?;
+                a.viewpoints_given = true;
+            }
             "--view" => a.view = val()?,
             "--size" => {
                 let v = val()?;
@@ -294,9 +312,13 @@ struct SnapTimes {
 
 struct App {
     args: Args,
-    proxy: Option<EventLoopProxy<Msg>>,
+    proxy: Option<EventLoopProxy<Net>>,
     gpu: Option<Gpu>,
     scene: Scene,
+    /// Points of a slot diff stream (decision 0052); empty when following snapshots.
+    slots: SlotScene,
+    /// Frame the first slot state that arrives (no `--viewpoints` given).
+    fit_pending: bool,
     views: Vec<(String, Camera)>,
     camera: Camera,
     drag: Option<(f64, f64)>,
@@ -316,6 +338,94 @@ struct App {
 }
 
 impl App {
+    /// A slot stream message (decision 0052): an event is applied whole when its message is in.
+    fn on_slot_msg(&mut self, m: SlotMsg) {
+        let now = Instant::now();
+        match m {
+            SlotMsg::Received { event, at } => {
+                self.marks.add(
+                    "snapshot_received",
+                    at,
+                    &format!(",\"seq\":{},\"kind\":\"{}\"", event.seq, event.kind),
+                );
+                let s = self.snaps.entry(event.seq).or_default();
+                s.kind = event.kind;
+                s.received = Some(at);
+            }
+            SlotMsg::Message {
+                seq,
+                bytes,
+                state,
+                fetch_start,
+                at,
+            } => {
+                self.marks
+                    .add("fetch_start", fetch_start, &format!(",\"seq\":{seq}"));
+                let fetch_ms = at.duration_since(fetch_start).as_secs_f64() * 1e3;
+                let delivery = if state { "slots_state" } else { "slots" };
+                self.marks.add(
+                    "delivered",
+                    at,
+                    &format!(
+                        ",\"seq\":{seq},\"delivery\":\"{delivery}\",\"bytes\":{},\"fetch_ms\":{fetch_ms:.3}",
+                        bytes.len()
+                    ),
+                );
+                let s = self.snaps.entry(seq).or_default();
+                s.delivery = delivery.into();
+                s.bytes = bytes.len() as u64;
+                let Some(gpu) = &self.gpu else { return };
+                let t = Instant::now();
+                // A folded state (cold, or the fallback for an event that could not be fetched)
+                // replaces the scene.
+                let applied = if state {
+                    self.slots.apply_state(&gpu.device, &gpu.queue, &bytes)
+                } else {
+                    self.slots.apply(&gpu.device, &gpu.queue, &bytes)
+                };
+                let apply_ms = t.elapsed().as_secs_f64() * 1e3;
+                match applied {
+                    Ok(Applied::Shown(seqs)) => {
+                        self.marks.add(
+                            "uploaded",
+                            Instant::now(),
+                            &format!(
+                                ",\"seq\":{seq},\"points\":{},\"gpu_bytes\":{},\"upload_ms\":{apply_ms:.3},\"upload_bytes\":{},\"applied\":{seqs:?}",
+                                self.slots.points(),
+                                self.slots.gpu_bytes(),
+                                self.slots.last_upload_bytes()
+                            ),
+                        );
+                        self.to_present.extend(seqs.into_iter().map(|s| (s, true)));
+                    }
+                    Ok(Applied::Held) => eprintln!("event {seq}: held for a missing seq"),
+                    Ok(Applied::Stale) => eprintln!("event {seq}: stale message dropped"),
+                    Err(e) => {
+                        eprintln!("event {seq}: bad message: {e}");
+                        self.errors += 1;
+                    }
+                }
+                if self.fit_pending
+                    && let Some(b) = self.slots.bounds()
+                {
+                    self.fit_pending = false;
+                    self.camera = fit_camera(b, self.camera.fov_y_deg);
+                }
+            }
+            SlotMsg::End => {
+                self.marks.add("end", now, "");
+                self.ended = true;
+            }
+            SlotMsg::Error(e) => {
+                eprintln!("error: {e}");
+                self.errors += 1;
+            }
+        }
+        if let Some(gpu) = &self.gpu {
+            gpu.window.request_redraw();
+        }
+    }
+
     fn on_msg(&mut self, m: Msg) {
         let now = Instant::now();
         match m {
@@ -445,7 +555,7 @@ impl App {
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
         let size = [gpu.config.width, gpu.config.height];
-        gpu.renderer.render(
+        gpu.renderer.render_with_slots(
             &gpu.device,
             &gpu.queue,
             &mut enc,
@@ -453,7 +563,8 @@ impl App {
             &gpu.depth,
             size,
             &self.camera,
-            &self.scene,
+            &[&self.scene],
+            &[&self.slots],
         );
         let index = gpu.queue.submit([enc.finish()]);
         if !self.to_present.is_empty() {
@@ -501,8 +612,8 @@ impl App {
         writeln!(
             s,
             "points on screen: {}, GPU vertex bytes: {}",
-            self.scene.points(),
-            self.scene.gpu_bytes()
+            self.scene.points() + self.slots.points(),
+            self.scene.gpu_bytes() + self.slots.gpu_bytes()
         )
         .unwrap();
         s
@@ -533,7 +644,7 @@ impl App {
                 .device
                 .create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
             let size = [gpu.config.width, gpu.config.height];
-            gpu.renderer.render(
+            gpu.renderer.render_with_slots(
                 &gpu.device,
                 &gpu.queue,
                 &mut enc,
@@ -541,7 +652,8 @@ impl App {
                 &gpu.depth,
                 size,
                 &self.camera,
-                &self.scene,
+                &[&self.scene],
+                &[&self.slots],
             );
             gpu.queue.submit([enc.finish()]);
             gpu.window.pre_present_notify();
@@ -614,7 +726,7 @@ impl App {
                     if let Some(t) = timer.as_mut() {
                         t.next(&mut gpu.renderer);
                     }
-                    gpu.renderer.render(
+                    gpu.renderer.render_with_slots(
                         &gpu.device,
                         &gpu.queue,
                         &mut enc,
@@ -622,7 +734,8 @@ impl App {
                         &gpu.depth,
                         size,
                         cam,
-                        &self.scene,
+                        &[&self.scene],
+                        &[&self.slots],
                     );
                     index = Some(gpu.queue.submit([enc.finish()]));
                 }
@@ -679,7 +792,19 @@ fn glam_rotate(v: glam::DVec3, k: glam::DVec3, angle: f64) -> glam::DVec3 {
     v * c + k.cross(v) * s + k * k.dot(v) * (1.0 - c)
 }
 
-impl ApplicationHandler<Msg> for App {
+/// A camera that frames the box `b` (ENU) from the south-west and above, like the `overview_sw`
+/// viewpoint (decision 0017): the bounding sphere fills the vertical field of view.
+fn fit_camera(b: ([f64; 3], [f64; 3]), fov_y_deg: f64) -> Camera {
+    let (lo, hi) = b;
+    let c = [0, 1, 2].map(|a| 0.5 * (lo[a] + hi[a]));
+    let r = 0.5 * (0..3).map(|a| (hi[a] - lo[a]).powi(2)).sum::<f64>().sqrt();
+    let d = r.max(1.0) / (fov_y_deg.to_radians() / 2.0).sin();
+    let dir = glam::DVec3::new(-1.0, -1.0, 1.4).normalize();
+    let eye = glam::DVec3::from(c) + dir * d;
+    Camera::new(eye.to_array(), c, [0.0, 0.0, 1.0], fov_y_deg)
+}
+
+impl ApplicationHandler<Net> for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.gpu.is_some() {
             return;
@@ -719,9 +844,6 @@ impl ApplicationHandler<Msg> for App {
         }
         // Start the network only once the device exists, so no chunk waits for it.
         let proxy = self.proxy.take().expect("proxy set in main");
-        let send = move |m: Msg| {
-            let _ = proxy.send_event(m);
-        };
         let host = match net::host_port(&self.args.server) {
             Ok(h) => h,
             Err(e) => {
@@ -735,6 +857,24 @@ impl ApplicationHandler<Msg> for App {
             Instant::now(),
             &format!(",\"scenario\":\"{}\"", self.args.scenario),
         );
+        // A slot diff stream says so in its manifest (decision 0052); an unreachable server is left
+        // to the snapshot path, which reports it.
+        if net::is_slot_stream(&host).unwrap_or(false) {
+            eprintln!("server: slot diff stream");
+            self.fit_pending = !self.args.viewpoints_given;
+            let send = move |m: SlotMsg| {
+                let _ = proxy.send_event(Net::Slots(m));
+            };
+            if self.args.scenario != "replay" {
+                net::spawn_slots_cold(host, None, send);
+            } else {
+                net::spawn_slots(host, None, self.args.speed, send);
+            }
+            return;
+        }
+        let send = move |m: Msg| {
+            let _ = proxy.send_event(Net::Chunks(m));
+        };
         if self.args.scenario != "replay" {
             net::spawn_cold(host, send);
         } else {
@@ -742,8 +882,11 @@ impl ApplicationHandler<Msg> for App {
         }
     }
 
-    fn user_event(&mut self, _: &ActiveEventLoop, m: Msg) {
-        self.on_msg(m);
+    fn user_event(&mut self, _: &ActiveEventLoop, m: Net) {
+        match m {
+            Net::Chunks(m) => self.on_msg(m),
+            Net::Slots(m) => self.on_slot_msg(m),
+        }
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _: WindowId, event: WindowEvent) {
@@ -860,7 +1003,7 @@ fn main() -> std::process::ExitCode {
         eprintln!("unknown viewpoint {}", args.view);
         return std::process::ExitCode::from(2);
     };
-    let event_loop = match EventLoop::<Msg>::with_user_event().build() {
+    let event_loop = match EventLoop::<Net>::with_user_event().build() {
         Ok(l) => l,
         Err(e) => {
             eprintln!("event loop: {e}");
@@ -872,6 +1015,9 @@ fn main() -> std::process::ExitCode {
         args,
         gpu: None,
         scene: Scene::new(),
+        // cumulus3d's `enu` frame: positions are metres from the stream origin, which is ENU 0.
+        slots: SlotScene::new([0.0; 3]),
+        fit_pending: false,
         views,
         camera,
         drag: None,

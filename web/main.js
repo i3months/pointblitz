@@ -11,6 +11,14 @@
 //   view     = viewpoint to start at (default overview_sw)
 //   backend  = auto | webgpu | webgl   (auto: WebGPU when available, otherwise WebGL2 — P2.4)
 //   pkg      = full | webgpu           (webgpu: the WebGPU-only module, 0.37 MB instead of 4.25 MB — decision 0033)
+//   viewpoints = file under /static/ (default bench/viewpoints/flight-01.json)
+//
+// A replay server of a slot diff stream (`replay --stream`, decision 0052; "stream":"slots" in its
+// manifest) announces `slots` events: each event's message (/slots/<seq>) is fetched as it is
+// announced and applied whole to the viewer's slot scene, in seq order; one that cannot be fetched
+// is replaced by the folded state through it. Cold fetches the folded state (/slots/state?seq=<last>). The marks are the
+// same; `uploaded` carries upload_ms (apply time) and upload_bytes. Without `viewpoints` the camera
+// frames the first state.
 //
 // Hooks on window.__pb (read by bench/web/*.mjs and the baseline harness): marks [{name, t, ...}],
 // frames [t], longtasks [{t, ms}], info, gpu, setView(name), ready, done. Mark names follow the
@@ -182,6 +190,113 @@ async function deliver(snap) {
   mark('delivered', { seq: snap.seq, bytes, delivery, generation });
 }
 
+let fitPending = false; // slot stream without viewpoints: frame the first state
+
+/** Frames the slot scene from the south-west and above (like overview_sw, decision 0017). */
+function fitCamera() {
+  const b = viewer.slot_bounds();
+  if (b.length !== 6) return;
+  fitPending = false;
+  const c = [0, 1, 2].map((a) => 0.5 * (b[a] + b[a + 3]));
+  const r = Math.max(1, 0.5 * Math.hypot(b[3] - b[0], b[4] - b[1], b[5] - b[2]));
+  const d = r / Math.sin(((fov / 2) * Math.PI) / 180);
+  cam = { eye: add(c, scale(norm([-1, -1, 1.4]), d)), target: c, up: [0, 0, 1] };
+  applyCamera();
+}
+
+/** GET as bytes; throws on a failed request. */
+async function getBytes(url) {
+  const res = await fetch(url, { cache: 'no-store' });
+  if (!res.ok) throw new Error(`${url}: ${res.status}`);
+  return new Uint8Array(await res.arrayBuffer());
+}
+
+const slotAttempts = 3; // tries per event before falling back to the folded state
+
+/**
+ * Fetches one slot message (an event, or `state` = everything through it) and applies it whole.
+ * Events are fetched as they are announced, so they may complete out of order: the viewer holds a
+ * message until the ones before it are in. An event that cannot be fetched after retries is
+ * replaced by the folded state through it, applied with apply_slots_state (otherwise every later
+ * event would wait for it, and without event 1 the scene would never start).
+ */
+async function deliverSlots(ev, state = false) {
+  mark('fetch_start', { seq: ev.seq });
+  let bytes = null;
+  for (let k = 0; !state && k < slotAttempts && !bytes; k++) {
+    if (k > 0) await new Promise((r) => setTimeout(r, 100));
+    bytes = await getBytes(`/slots/${ev.seq}`).catch((e) => (mark('slots_fetch_error', { seq: ev.seq, message: String(e) }), null));
+  }
+  if (!bytes) {
+    state = true;
+    bytes = await getBytes(`/slots/state?seq=${ev.seq}`);
+  }
+  const delivery = state ? 'slots_state' : 'slots';
+  mark('headers', { seq: ev.seq });
+  mark('last_chunk_received', { seq: ev.seq });
+  mark('fetch_end', { seq: ev.seq, bytes: bytes.length, delivery });
+  mark('delivered', { seq: ev.seq, bytes: bytes.length, delivery });
+  const t0 = performance.now();
+  const r = state ? viewer.apply_slots_state(bytes) : viewer.apply_slots(bytes);
+  const ms = performance.now() - t0;
+  if (r === 'held' || r === 'stale') {
+    mark('slots_' + r, { seq: ev.seq });
+    return;
+  }
+  const { applied } = JSON.parse(r);
+  mark('uploaded', { seq: ev.seq, points: viewer.points(), gpu_bytes: viewer.gpu_bytes(), upload_ms: ms, upload_bytes: viewer.slot_upload_bytes(), applied });
+  for (const seq of applied) toPresent.push([seq, 'all']);
+  if (fitPending) fitCamera();
+  dirty = true;
+}
+
+async function replaySlots() {
+  // Each event is fetched the moment it is announced (events 8–10 of theater30 come 70 ms apart);
+  // the slot scene applies them in seq order.
+  const deliveries = [];
+  await new Promise((resolve, reject) => {
+    const es = new EventSource(`/events?speed=${speed}`);
+    es.addEventListener('slots', (m) => {
+      const ev = JSON.parse(m.data);
+      mark('snapshot_received', { seq: ev.seq, kind: ev.kind });
+      const d = deliverSlots(ev);
+      d.catch(reject);
+      deliveries.push(d);
+    });
+    es.addEventListener('end', () => {
+      es.close();
+      Promise.all(deliveries).then(resolve, reject);
+    });
+    es.onerror = () => {
+      if (es.readyState === EventSource.CLOSED) reject(new Error('event stream closed'));
+    };
+  });
+  await allSlotsPresented();
+}
+
+/**
+ * Resolves when every received event has been presented. Counting uploads (allPresented) does not
+ * work here: a held event has no upload of its own and is presented with the one that releases it.
+ */
+function allSlotsPresented() {
+  return new Promise((resolve) => {
+    const check = () => {
+      const presented = new Set(pb.marks.filter((m) => m.name === 'presented').map((m) => m.seq));
+      const missing = pb.marks.filter((m) => m.name === 'snapshot_received' && !presented.has(m.seq));
+      if (missing.length === 0 && toPresent.length === 0) resolve();
+      else requestAnimationFrame(check);
+    };
+    check();
+  });
+}
+
+async function coldSlots(events) {
+  const last = events[events.length - 1];
+  mark('snapshot_received', { seq: last.seq, kind: last.kind });
+  await deliverSlots(last, true);
+  await allSlotsPresented();
+}
+
 /** Resolves when every delivered snapshot has been presented. */
 function allPresented() {
   return new Promise((resolve) => {
@@ -299,16 +414,30 @@ async function main() {
   requestAnimationFrame(frame);
   if (scenario === 'check') return;
 
-  const vp = await (await fetch('/static/bench/viewpoints/flight-01.json')).json();
-  viewpoints = vp.viewpoints;
-  fov = vp.camera.fov_y_deg;
-  await setView(params.get('view') ?? 'overview_sw');
+  const served = await (await fetch('/manifest.json')).json();
+  const slots = served.stream === 'slots';
+  const manifest = served.events;
+  if (slots && !params.get('viewpoints')) {
+    // No fixed viewpoints for this data given: frame the first state (fitCamera).
+    fitPending = true;
+    cam = { eye: [0, -10, 10], target: [0, 0, 0], up: [0, 0, 1] };
+  } else {
+    const vp = await (await fetch(`/static/${params.get('viewpoints') ?? 'bench/viewpoints/flight-01.json'}`)).json();
+    viewpoints = vp.viewpoints;
+    fov = vp.camera.fov_y_deg;
+    await setView(params.get('view') ?? 'overview_sw');
+  }
   if (scenario !== 'orbit') attachControls(document.getElementById('view'));
-  const manifest = (await (await fetch('/manifest.json')).json()).events;
-  mark('start', { scenario });
+  mark('start', { scenario, stream: slots ? 'slots' : 'snapshots' });
   pb.ready = true;
 
-  if (scenario === 'replay') await replay();
+  if (slots && scenario === 'replay') await replaySlots();
+  else if (slots && (scenario === 'cold' || scenario === 'still')) await coldSlots(manifest);
+  else if (slots && scenario === 'orbit') {
+    await coldSlots(manifest);
+    await orbit();
+  }
+  else if (scenario === 'replay') await replay();
   else if (scenario === 'cold' || scenario === 'still') await cold(manifest);
   else if (scenario === 'orbit') {
     await cold(manifest);

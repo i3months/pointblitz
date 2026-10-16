@@ -12,6 +12,12 @@
 //! snapshot PLYs are read there and converted in this process instead of fetched from `/chunks`.
 //! Announcements still come from the replay server's `/events`.
 //!
+//! A replay server of a slot diff stream (`replay --stream`, decision 0052) is recognised from its
+//! manifest; each event's message is applied to a `SlotScene` whole in the tick it arrives. With
+//! `--data <dir>` the dir is the stream directory (`live/stream`) on this machine and the messages
+//! are read there. Frame metadata and announcements are the same as for snapshots (`visible` lists
+//! the events applied in that frame).
+//!
 //! Each frame is one binary WebSocket message: `u32 LE metadata length`, the metadata (UTF-8 JSON),
 //! then the H.264 access unit (Annex B). Metadata: `frame` (counter), `idr`, `t_ms` (server clock,
 //! ms since start, when the frame's tick began), `render_ms`, `encode_ms`, `visible` (snapshots that
@@ -33,8 +39,8 @@
 use crate::nvenc::{Config, Encoder};
 use crate::phase::PhaseLock;
 use glam::DVec3;
-use pointblitz_core::{Camera, Headless, Inserted, Scene};
-use pointblitz_io::client::{self, Msg};
+use pointblitz_core::{Applied, Camera, Headless, Inserted, Scene, SlotScene};
+use pointblitz_io::client::{self, Msg, SlotMsg};
 use std::fmt::Write as _;
 use std::net::{TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -137,6 +143,12 @@ pub fn frame_message(meta: &str, h264: &[u8]) -> Vec<u8> {
     out.extend(meta.as_bytes());
     out.extend(h264);
     out
+}
+
+/// What the replay follower sends: snapshot chunks, or slot stream messages (decision 0052).
+enum Net {
+    Chunks(Msg),
+    Slots(SlotMsg),
 }
 
 /// What goes to a client: a frame (binary) or an announcement (text).
@@ -330,6 +342,8 @@ pub fn run(args: &[String]) -> Result<(), String> {
     eprintln!("adapter: {} ({:?})", info.name, info.backend);
     let mut hl = Headless::new(&device, [w, h]);
     let mut scene = Scene::new();
+    // cumulus3d's `enu` frame: slot positions are metres from ENU 0.
+    let mut slots = SlotScene::new([0.0; 3]);
     let mut encoder = Encoder::new(Config {
         width: w,
         height: h,
@@ -373,17 +387,28 @@ pub fn run(args: &[String]) -> Result<(), String> {
     }
 
     // Replay follower: same client as the native viewer (decision 0026).
-    let (msg_tx, msg_rx) = mpsc::channel::<Msg>();
+    let (msg_tx, msg_rx) = mpsc::channel::<Net>();
     let host = client::host_port(replay)?;
     let msg_tx = Mutex::new(msg_tx);
     let send = move |m| {
         let _ = msg_tx.lock().unwrap_or_else(|e| e.into_inner()).send(m);
     };
-    match (data_dir, cold) {
-        (Some(dir), true) => client::spawn_cold_local(host, dir, send),
-        (Some(dir), false) => client::spawn_replay_local(host, dir, speed, send),
-        (None, true) => client::spawn_cold(host, send),
-        (None, false) => client::spawn_replay(host, speed, send),
+    if client::is_slot_stream(&host).unwrap_or(false) {
+        eprintln!("serve: slot diff stream");
+        let send = move |m| send(Net::Slots(m));
+        if cold {
+            client::spawn_slots_cold(host, data_dir, send);
+        } else {
+            client::spawn_slots(host, data_dir, speed, send);
+        }
+    } else {
+        let send = move |m| send(Net::Chunks(m));
+        match (data_dir, cold) {
+            (Some(dir), true) => client::spawn_cold_local(host, dir, send),
+            (Some(dir), false) => client::spawn_replay_local(host, dir, speed, send),
+            (None, true) => client::spawn_cold(host, send),
+            (None, false) => client::spawn_replay(host, speed, send),
+        }
     }
 
     let t0 = Instant::now();
@@ -408,6 +433,56 @@ pub fn run(args: &[String]) -> Result<(), String> {
         let mut visible = Vec::new();
         let mut first_visible = Vec::new();
         while let Ok(m) = msg_rx.try_recv() {
+            let m = match m {
+                Net::Chunks(m) => m,
+                Net::Slots(m) => {
+                    match m {
+                        // The whole event goes into this tick's frame (decision 0052).
+                        SlotMsg::Message {
+                            seq,
+                            bytes,
+                            state,
+                            at,
+                            ..
+                        } => {
+                            // A folded state (cold, or the fallback for a lost event) replaces
+                            // the scene.
+                            let r = if state {
+                                slots.apply_state(&device, &queue, &bytes)
+                            } else {
+                                slots.apply(&device, &queue, &bytes)
+                            };
+                            match r {
+                                Ok(Applied::Shown(seqs)) => {
+                                    newest_visible = seqs.last().copied();
+                                    visible.extend(seqs);
+                                }
+                                Ok(Applied::Held) => eprintln!("event {seq}: held"),
+                                Ok(Applied::Stale) => eprintln!("event {seq}: stale"),
+                                Err(e) => eprintln!("event {seq}: bad message: {e}"),
+                            }
+                            writeln!(
+                                log,
+                                r#"{{"type":"chunk","seq":{seq},"first_pass":false,"last":true,"at_ms":{:.3},"tick_ms":{:.3},"frame":{frame}}}"#,
+                                ms_since(at),
+                                ms_since(tick_start)
+                            )
+                            .unwrap();
+                            continue;
+                        }
+                        SlotMsg::Received { event, at } => Msg::Received {
+                            snap: client::Snapshot {
+                                seq: event.seq,
+                                kind: event.kind,
+                                points: event.points as usize,
+                            },
+                            at,
+                        },
+                        SlotMsg::End => Msg::End,
+                        SlotMsg::Error(e) => Msg::Error(e),
+                    }
+                }
+            };
             match m {
                 Msg::Chunk {
                     seq,
@@ -520,7 +595,7 @@ pub fn run(args: &[String]) -> Result<(), String> {
         };
 
         let t_render = Instant::now();
-        let rgba = hl.capture(&device, &queue, &camera, &scene);
+        let rgba = hl.capture_with_slots(&device, &queue, &camera, &[&scene], &[&slots]);
         let render_ms = t_render.elapsed().as_secs_f64() * 1e3;
         let force_idr = joined.swap(false, Ordering::SeqCst);
         let f = encoder.encode(&rgba, force_idr)?;
@@ -534,7 +609,7 @@ pub fn run(args: &[String]) -> Result<(), String> {
             visible,
             first_visible,
             newest_visible.map_or("null".into(), |s| s.to_string()),
-            scene.points()
+            scene.points() + slots.points()
         )
         .unwrap();
         broadcast(

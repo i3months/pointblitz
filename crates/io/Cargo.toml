@@ -13,13 +13,16 @@ keywords = ["point-cloud", "ply", "streaming", "parser"]
 categories = ["parser-implementations", "graphics"]
 
 [dependencies]
-# Only with the `client` feature: event and manifest JSON in the replay client.
+# Only with the `client` or `stream` feature: event and manifest JSON (replay client, v4 stream).
 serde_json = { version = "1", optional = true }
 
 [features]
 # The replay-server client (std::net). Off by default so the core, which depends on this crate,
 # never pulls in network code (SPEC §3.1, decision 0003, PR #26 review). native and server enable it.
-client = ["dep:serde_json"]
+client = ["stream"]
+# Reading a cumulus3d v4 `live/stream` directory (`slots::dir`, decision 0052). Off by default for
+# the same reason: its manifest is JSON.
+stream = ["dep:serde_json"]
 
 
 [lints]
