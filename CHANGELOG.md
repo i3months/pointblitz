@@ -3,6 +3,21 @@
 All six crates (`pointblitz`, `pointblitz-core`, `pointblitz-io`, `pointblitz-native`, `pointblitz-server`,
 `pointblitz-web`) share one version.
 
+## 0.2.1 — 2026-10-16
+
+Additions only; 0.2.0 code builds unchanged and the chunk format is still v2.
+
+- `pointblitz-core`: layers for drawing points, meshes and lines in one pass with one depth buffer, upstreamed from
+  SkyLens (which carried them as a vendored patch of 0.2.0): `begin_pass` (clear colour, depth kept), `FrameStyle`,
+  `Fog` (three.js-style linear fog on every shader), `MeshRenderer` (Lambert or unlit, textures with mipmaps,
+  generated normals, opaque/alpha/additive blending), `LineRenderer` (1 px lines, per-vertex alpha).
+- `Renderer::set_point_size` (`PointSize::Pixels` or `PointSize::Metres` with distance attenuation),
+  `Renderer::prepare` / `Renderer::draw` (several scenes per frame into a pass the caller opened, optional
+  per-scene alpha); `render` uses the same path.
+- `Headless::capture_with`: capture a frame the caller records.
+- Written for WebGL2 limits (uniforms read in the vertex stage only, no storage buffers, dynamic-offset uniform
+  slots); not yet run in a browser, since the web crate does not use the layers.
+
 ## 0.2.0 — 2026-10-09
 
 **Breaking: chunk format v2.** Clients and servers of 0.1.0 cannot read what 0.2.0 sends, and the other way round
