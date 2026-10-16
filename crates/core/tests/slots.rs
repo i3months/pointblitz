@@ -167,15 +167,109 @@ fn messages_apply_in_seq_order() {
             .is_err()
     );
     assert_eq!(s.seq(), Some(3));
-    // After clear, a folded state of any seq is taken.
-    s.clear();
+    // A folded state of any seq is taken through apply_state.
     let state = msg(9, 1, &[(0, p, [7, 7, 7])], &[], &[]);
     assert_eq!(
-        s.apply(&device, &queue, &state).unwrap(),
+        s.apply_state(&device, &queue, &state).unwrap(),
         Applied::Shown(vec![9])
     );
     let img = hl.capture_with_slots(&device, &queue, &cam, &[], &[&s]);
     assert_eq!(pixel(&img, px, py), [7, 7, 7, 255]);
+}
+
+#[test]
+fn a_new_scene_starts_only_at_seq_1_or_a_folded_state() {
+    let Some((device, queue)) = gpu() else { return };
+    let cam = looking_north();
+    let mut hl = Headless::new(&device, [W, H]);
+    let a = [1.0f32, 0.0, 0.0];
+    let b = [-1.0f32, 0.0, 0.0];
+    let (ax, ay) = at(&cam, a.map(f64::from));
+    let (bx, by) = at(&cam, b.map(f64::from));
+    // Event 1 could not be fetched: event 2 must not become the start (event 1's points would
+    // never appear).
+    let mut s = SlotScene::new([0.0; 3]);
+    let two = msg(2, 2, &[(1, b, [0, 0, 255])], &[], &[]);
+    assert_eq!(s.apply(&device, &queue, &two).unwrap(), Applied::Held);
+    assert_eq!((s.seq(), s.points()), (None, 0));
+    // The client falls back to the folded state through 1: it starts the scene and the held event
+    // 2 follows in the same upload.
+    let state1 = msg(1, 1, &[(0, a, [255, 0, 0])], &[], &[]);
+    assert_eq!(
+        s.apply_state(&device, &queue, &state1).unwrap(),
+        Applied::Shown(vec![1, 2])
+    );
+    let img = hl.capture_with_slots(&device, &queue, &cam, &[], &[&s]);
+    assert_eq!(pixel(&img, ax, ay), [255, 0, 0, 255]);
+    assert_eq!(pixel(&img, bx, by), [0, 0, 255, 255]);
+    // `expect` starts a scene at a later event explicitly.
+    let mut late = SlotScene::new([0.0; 3]);
+    late.expect(2);
+    assert_eq!(
+        late.apply(&device, &queue, &two).unwrap(),
+        Applied::Shown(vec![2])
+    );
+    assert_eq!(late.points(), 1);
+}
+
+#[test]
+fn a_missing_event_is_recovered_from_a_folded_state() {
+    let Some((device, queue)) = gpu() else { return };
+    let cam = looking_north();
+    let mut hl = Headless::new(&device, [W, H]);
+    let a = [1.0f32, 0.0, 0.0];
+    let b = [-1.0f32, 0.0, 0.0];
+    let c = [0.0f32, 0.0, 0.6];
+    let (ax, ay) = at(&cam, a.map(f64::from));
+    let (bx, by) = at(&cam, b.map(f64::from));
+    let (cx, cy) = at(&cam, c.map(f64::from));
+    let mut s = SlotScene::new([0.0; 3]);
+    s.apply(
+        &device,
+        &queue,
+        &msg(1, 1, &[(0, a, [255, 0, 0])], &[], &[]),
+    )
+    .unwrap();
+    // Event 2 (move slot 0 to b) is lost; 3 and 4 are held, the screen stays at event 1.
+    for m in [
+        msg(3, 2, &[(1, c, [0, 255, 0])], &[], &[]),
+        msg(4, 2, &[], &[(1, c, [0, 200, 0])], &[]),
+    ] {
+        assert_eq!(s.apply(&device, &queue, &m).unwrap(), Applied::Held);
+    }
+    assert_eq!((s.seq(), s.held()), (Some(1), 2));
+    // Folded state through 2 (slot 0 at b), then 3 and 4 from the held queue.
+    let state2 = msg(2, 1, &[(0, b, [255, 0, 0])], &[], &[]);
+    assert_eq!(
+        s.apply_state(&device, &queue, &state2).unwrap(),
+        Applied::Shown(vec![2, 3, 4])
+    );
+    assert_eq!((s.seq(), s.held(), s.points()), (Some(4), 0, 2));
+    let img = hl.capture_with_slots(&device, &queue, &cam, &[], &[&s]);
+    assert_eq!(pixel(&img, ax, ay), [0, 0, 0, 255]);
+    assert_eq!(pixel(&img, bx, by), [255, 0, 0, 255]);
+    assert_eq!(pixel(&img, cx, cy), [0, 200, 0, 255]);
+}
+
+#[test]
+fn a_message_too_large_for_the_device_is_refused_before_holding() {
+    let Some((device, queue)) = gpu() else { return };
+    let mut s = SlotScene::new([0.0; 3]);
+    let p = [0.0f32; 3];
+    s.apply(&device, &queue, &msg(1, 1, &[(0, p, [1; 3])], &[], &[]))
+        .unwrap();
+    // Seq 3 needs more slots than any buffer: refused at once, not held in front of seq 2.
+    let huge = msg(3, u32::MAX - 1, &[], &[], &[]);
+    assert!(matches!(
+        s.apply(&device, &queue, &huge),
+        Err(pointblitz_core::ApplyError::TooManySlots { .. })
+    ));
+    assert_eq!(s.held(), 0);
+    let two = msg(2, 1, &[], &[(0, p, [2; 3])], &[]);
+    assert_eq!(
+        s.apply(&device, &queue, &two).unwrap(),
+        Applied::Shown(vec![2])
+    );
 }
 
 #[test]
@@ -303,7 +397,7 @@ fn theater30_replace_events_apply_in_one_frame() {
         fold.apply(m).unwrap();
     }
     let mut s = SlotScene::new([0.0; 3]);
-    s.apply(&device, &queue, &fold.message()).unwrap();
+    s.apply_state(&device, &queue, &fold.message()).unwrap();
     let cam = fit(s.bounds().unwrap());
     s.clear();
     for (e, m) in &messages {

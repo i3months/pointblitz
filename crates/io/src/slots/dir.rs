@@ -147,7 +147,7 @@ impl StreamDir {
             None => Vec::new(),
         };
         let want = super::pack_len(e.n_add, e.n_move, e.n_remove);
-        if pack.len() != want || pack.len() as u64 != e.bytes {
+        if pack.len() as u64 != want || pack.len() as u64 != e.bytes {
             return Err(invalid(format!(
                 "event {}: pack is {} B, counts give {want} B, manifest says {} B",
                 e.seq,

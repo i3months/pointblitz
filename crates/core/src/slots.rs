@@ -11,8 +11,10 @@
 //! WebGL2. When the capacity outgrows the buffer it doubles and the old contents are copied on the
 //! GPU.
 //!
-//! Messages are applied in `seq` order: one that skips ahead is held until the missing ones arrive,
-//! one at or before the last applied one is dropped.
+//! Messages are applied in `seq` order from seq 1: one that skips ahead is held until the missing
+//! ones arrive, one at or before the last applied one is dropped. A scene starts later only from a
+//! folded state ([`SlotScene::apply_state`]) or an explicit [`SlotScene::expect`]; a client that
+//! cannot get a message recovers the same way (fetch the folded state through it, `apply_state`).
 
 use glam::DVec3;
 use pointblitz_io::slots::{self, ADD_BYTES, Diff, MOVE_BYTES, SlotError};
@@ -77,6 +79,9 @@ pub struct SlotScene {
     capacity: u32,
     points: u64,
     applied: Option<u32>,
+    /// The seq `apply` takes next: 1 for a new scene (the stream's first event), the one after the
+    /// last applied, or what `expect` set.
+    next: u32,
     held: BTreeMap<u32, Vec<u8>>,
     /// Bytes the last `apply` wrote to the GPU.
     last_upload: u64,
@@ -94,6 +99,7 @@ impl SlotScene {
             capacity: 0,
             points: 0,
             applied: None,
+            next: 1,
             held: BTreeMap::new(),
             last_upload: 0,
         }
@@ -137,15 +143,22 @@ impl SlotScene {
         self.buffer.as_ref()
     }
 
-    /// Forgets everything (e.g. before applying a folded state); the next message is applied
-    /// whatever its seq.
+    /// Forgets everything; the next message taken is seq 1 again (or what `expect` sets).
     pub fn clear(&mut self) {
         *self = Self::new(self.origin.to_array());
     }
 
+    /// Makes `seq` the next message taken, for a scene that joins a stream later without a folded
+    /// state (the slots it does not get stay hidden). Held messages before it are dropped.
+    pub fn expect(&mut self, seq: u32) {
+        self.next = seq;
+        self.held.retain(|s, _| *s > seq);
+    }
+
     /// Applies one message (validated first; a bad one changes nothing) and any held messages that
-    /// follow it, then writes the changed slots to the GPU in one `write_buffer`. The first message
-    /// after `new` or `clear` is applied whatever its seq — a folded state, or the first event.
+    /// follow it, then writes the changed slots to the GPU in one `write_buffer`. Only the expected
+    /// seq is applied — seq 1 for a new scene; a later one is held until the ones before it arrive,
+    /// an earlier one is dropped. A folded state starts a scene through [`SlotScene::apply_state`].
     pub fn apply(
         &mut self,
         device: &wgpu::Device,
@@ -153,41 +166,87 @@ impl SlotScene {
         msg: &[u8],
     ) -> Result<Applied, ApplyError> {
         let header = slots::validate(msg)?;
-        match self.applied {
-            Some(last) if header.seq <= last => return Ok(Applied::Stale),
-            Some(last) if header.seq > last + 1 => {
-                self.held.insert(header.seq, msg.to_vec());
-                return Ok(Applied::Held);
-            }
-            _ => {}
-        }
+        // Checked on arrival, so a message that can never fit is not held in front of good ones.
         let max = device.limits().max_buffer_size / SLOT_BYTES as u64;
-        let mut capacity = self.capacity.max(header.capacity);
-        let mut next = header.seq + 1;
-        while let Some(m) = self.held.get(&next) {
-            capacity = capacity.max(slots::decode_header(m)?.capacity);
-            next += 1;
+        if u64::from(header.capacity) > max {
+            return Err(ApplyError::TooManySlots {
+                capacity: header.capacity,
+                max,
+            });
         }
-        if u64::from(capacity) > max {
-            return Err(ApplyError::TooManySlots { capacity, max });
+        if header.seq < self.next {
+            return Ok(Applied::Stale);
         }
+        if header.seq > self.next {
+            self.held.insert(header.seq, msg.to_vec());
+            return Ok(Applied::Held);
+        }
+        Ok(self.apply_in_order(device, queue, msg, header.seq, max))
+    }
 
+    /// Clears the scene and applies a folded state (`slots::Fold`, `/slots/state?seq=N`) whatever
+    /// its seq; held messages after it stay and follow it. This is also how a client recovers from
+    /// a message it could not get.
+    pub fn apply_state(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        msg: &[u8],
+    ) -> Result<Applied, ApplyError> {
+        let header = slots::validate(msg)?;
+        let max = device.limits().max_buffer_size / SLOT_BYTES as u64;
+        if u64::from(header.capacity) > max {
+            return Err(ApplyError::TooManySlots {
+                capacity: header.capacity,
+                max,
+            });
+        }
+        let held = std::mem::take(&mut self.held);
+        self.clear();
+        self.held = held;
+        self.expect(header.seq);
+        Ok(self.apply_in_order(device, queue, msg, header.seq, max))
+    }
+
+    /// Applies `msg` (seq `self.next`) and the held messages that follow it, with one upload.
+    fn apply_in_order(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        msg: &[u8],
+        seq: u32,
+        max: u64,
+    ) -> Applied {
+        let mut capacity = self
+            .capacity
+            .max(slots::decode_header(msg).map_or(0, |h| h.capacity));
+        let mut next = seq.checked_add(1);
+        while let Some(m) = next.and_then(|n| self.held.get(&n)) {
+            capacity = capacity.max(slots::decode_header(m).map_or(0, |h| h.capacity));
+            next = next.and_then(|n| n.checked_add(1));
+        }
         let mut dirty: Option<(u32, u32)> = None;
         self.grow_mirror(capacity);
         self.write(msg, &mut dirty);
-        let mut shown = vec![header.seq];
-        while let Some(m) = self.held.remove(&(self.applied.unwrap_or(0) + 1)) {
+        let mut shown = vec![seq];
+        while let Some(m) = self.held.remove(&self.next) {
             self.write(&m, &mut dirty);
             shown.push(self.applied.expect("set by write"));
         }
         self.upload(device, queue, max, dirty);
-        Ok(Applied::Shown(shown))
+        Applied::Shown(shown)
     }
 
     fn grow_mirror(&mut self, capacity: u32) {
         if capacity > self.capacity {
             self.capacity = capacity;
-            self.mirror.resize(capacity as usize * SLOT_BYTES, 0);
+            let len = capacity as usize * SLOT_BYTES;
+            // Amortised doubling on purpose: it can hold up to twice the bytes (73.5 MB for
+            // theater30's 46 MB), but an exact allocation reallocates on almost every event (ids
+            // creep up by a few thousand each) and cost about 15 ms per replace event, an eighth of
+            // headroom still about 6 ms on the events where the capacity jumps (PR #94). Memory is
+            // recorded, not traded for latency (INTENT principle 2, SPEC §7.1).
+            self.mirror.resize(len, 0);
         }
     }
 
@@ -217,6 +276,8 @@ impl SlotScene {
         }
         self.points = points;
         self.applied = Some(d.header.seq);
+        // `validate` rejects seq u32::MAX, so there is always a next one.
+        self.next = d.header.seq + 1;
     }
 
     /// Makes room for `capacity` slots on the GPU (doubling, old contents copied on the GPU), then

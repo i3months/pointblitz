@@ -48,14 +48,16 @@ pub struct SlotHeader {
 
 impl SlotHeader {
     /// Pack bytes after the header: `20 (add + move) + 4 remove`.
-    pub fn pack_len(&self) -> usize {
+    pub fn pack_len(&self) -> u64 {
         pack_len(self.n_add, self.n_move, self.n_remove)
     }
 }
 
-/// `20 (add + move) + 4 remove`, the v4 pack size.
-pub fn pack_len(n_add: u32, n_move: u32, n_remove: u32) -> usize {
-    (n_add as usize + n_move as usize) * ADD_BYTES + n_remove as usize * REMOVE_BYTES
+/// `20 (add + move) + 4 remove`, the v4 pack size. In u64, so a crafted header cannot overflow it on
+/// a 32-bit target (wasm32).
+pub fn pack_len(n_add: u32, n_move: u32, n_remove: u32) -> u64 {
+    (u64::from(n_add) + u64::from(n_move)) * ADD_BYTES as u64
+        + u64::from(n_remove) * REMOVE_BYTES as u64
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -66,14 +68,16 @@ pub enum SlotError {
     ReservedNotZero,
     /// Message length does not match the record counts.
     BadLength {
-        expected: usize,
-        actual: usize,
+        expected: u64,
+        actual: u64,
     },
     /// A record names a slot at or above the message's capacity.
     IdOutOfRange {
         id: u32,
         capacity: u32,
     },
+    /// `seq` u32::MAX: there would be no next seq.
+    SeqOutOfRange,
 }
 
 impl std::fmt::Display for SlotError {
@@ -87,11 +91,14 @@ impl std::error::Error for SlotError {}
 /// Puts the header in front of a v4 pack. The pack is not parsed (decision 0052: no conversion);
 /// only its length is checked against the counts.
 pub fn encode(header: &SlotHeader, pack: &[u8]) -> Result<Vec<u8>, SlotError> {
-    if pack.len() != header.pack_len() {
+    if pack.len() as u64 != header.pack_len() {
         return Err(SlotError::BadLength {
-            expected: HEADER_LEN + header.pack_len(),
-            actual: HEADER_LEN + pack.len(),
+            expected: HEADER_LEN as u64 + header.pack_len(),
+            actual: (HEADER_LEN + pack.len()) as u64,
         });
+    }
+    if header.seq == u32::MAX {
+        return Err(SlotError::SeqOutOfRange);
     }
     let mut out = Vec::with_capacity(HEADER_LEN + pack.len());
     out.extend(MAGIC);
@@ -137,13 +144,17 @@ pub fn decode_header(bytes: &[u8]) -> Result<SlotHeader, SlotError> {
         n_remove: u32_at(bytes, 20),
         capacity: u32_at(bytes, 24),
     };
-    let expected = HEADER_LEN + h.pack_len();
-    if bytes.len() != expected {
+    let expected = HEADER_LEN as u64 + h.pack_len();
+    if bytes.len() as u64 != expected {
         return Err(SlotError::BadLength {
             expected,
-            actual: bytes.len(),
+            actual: bytes.len() as u64,
         });
     }
+    if h.seq == u32::MAX {
+        return Err(SlotError::SeqOutOfRange);
+    }
+    // From here every section offset is at most bytes.len(), so usize arithmetic cannot overflow.
     Ok(h)
 }
 
@@ -265,7 +276,8 @@ pub fn add_capacity(pack: &[u8], n_add: u32) -> u32 {
         .0
         .iter()
         .take(n_add as usize)
-        .map(|r| u32_at(r, 0) + 1)
+        // Saturating: id u32::MAX cannot be below any capacity, so `validate` rejects it anyway.
+        .map(|r| u32_at(r, 0).saturating_add(1))
         .max()
         .unwrap_or(0)
 }
@@ -454,6 +466,22 @@ pub(crate) mod tests {
         );
         assert!(validate(&msg(1, 3, &[], &[], &[3])).is_err());
         assert!(validate(&msg(1, 3, &[], &[(5, 0.0, [0; 3])], &[])).is_err());
+        // Counts that would overflow a 32-bit usize are only a length mismatch.
+        let mut huge = good.clone();
+        huge[12..24].copy_from_slice(&[0xff; 12]);
+        assert!(matches!(
+            decode_header(&huge),
+            Err(SlotError::BadLength { expected, .. }) if expected > u64::from(u32::MAX)
+        ));
+        // seq u32::MAX has no successor.
+        let mut last = msg(1, 4, &[], &[], &[]);
+        last[8..12].copy_from_slice(&[0xff; 4]);
+        assert_eq!(validate(&last), Err(SlotError::SeqOutOfRange));
+        let h = SlotHeader {
+            seq: u32::MAX,
+            ..Default::default()
+        };
+        assert_eq!(encode(&h, &[]), Err(SlotError::SeqOutOfRange));
         // The pack must match the counts.
         let h = SlotHeader {
             n_add: 1,
