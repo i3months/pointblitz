@@ -6,13 +6,13 @@
 //!
 //! ```ignore
 //! let style = FrameStyle { clear: [0.039, 0.067, 0.157, 1.0], fog: Some(Fog { .. }) };
-//! points.prepare(device, queue, size, &camera, &scene, style.fog);
+//! points.prepare(device, queue, size, &camera, &[&scene], style.fog);
 //! meshes.prepare(queue, size, &camera, style.fog);
 //! lines.prepare(queue, size, &camera, style.fog);
 //! {
 //!     let mut pass = begin_pass(encoder, color, depth, &style);
 //!     meshes.draw_opaque(&mut pass);
-//!     points.draw(&mut pass, &scene);
+//!     points.draw(&mut pass, &[&scene], None);
 //!     meshes.draw_transparent(&mut pass);
 //!     lines.draw(&mut pass);
 //! }
@@ -58,7 +58,7 @@ pub struct Fog {
 /// Per-frame look shared by all layers.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct FrameStyle {
-    /// Background colour (linear RGBA, as the colour target expects).
+    /// Background colour, the value written to the colour target as is (see the module docs).
     pub clear: [f64; 4],
     pub fog: Option<Fog>,
 }

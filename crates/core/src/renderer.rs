@@ -375,7 +375,8 @@ impl Renderer {
                     true
                 }
             };
-            // Chunks inserted after `prepare` wait for the next frame.
+            // Chunks appended after `prepare` wait for the next frame. Call `prepare` again after a
+            // generation swap: until then `draw` uses the old slots for the new chunks.
             for (i, c) in scene.visible_chunks().iter().take(count).enumerate() {
                 let p = usize::from(c.header.stride != 12) + 2 * usize::from(faded);
                 if bound != Some(p) {

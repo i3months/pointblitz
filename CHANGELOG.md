@@ -15,7 +15,8 @@ Additions only; 0.2.0 code builds unchanged and the chunk format is still v2.
   `Renderer::prepare` / `Renderer::draw` (several scenes per frame into a pass the caller opened, optional
   per-scene alpha); `render` uses the same path.
 - `Headless::capture_with`: capture a frame the caller records.
-- WebGL2-safe: uniforms read in the vertex stage only, no storage buffers, dynamic-offset uniform slots.
+- Written for WebGL2 limits (uniforms read in the vertex stage only, no storage buffers, dynamic-offset uniform
+  slots); not yet run in a browser, since the web crate does not use the layers.
 
 ## 0.2.0 — 2026-10-09
 
