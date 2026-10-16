@@ -3,7 +3,7 @@
 All six crates (`pointblitz`, `pointblitz-core`, `pointblitz-io`, `pointblitz-native`, `pointblitz-server`,
 `pointblitz-web`) share one version.
 
-## Unreleased
+## 0.3.0 — 2026-10-16
 
 Additions only: 0.2.1 code builds unchanged, and the chunk format (v2) and the snapshot path are as before.
 Slot diff streams (decision 0052): cumulus3d 0.4.0's `--stable-display` live stream (format v4), where every point
@@ -36,7 +36,8 @@ owns a fixed slot id and each event carries only the points added, moved and rem
   `--upload mirror|scatter`, server video `--upload`, browser `?upload=scatter` (`Viewer::set_slot_upload`), the
   bench scripts pass it through, and `pointblitz-bench slot-apply --stream <dir>` times apply → GPU done per event
   for both. `PB_NO_GPU=1` makes `headless::device()` return none, so the GPU tests skip.
-- Not measured yet (decision 0052 §5).
+- GPU tests run on a V100 (Linux, Vulkan) with the real theater30 stream: (a) and (b) leave the same slot bytes and
+  captures. Not measured yet (decision 0052 §5).
 
 ## 0.2.1 — 2026-10-16
 

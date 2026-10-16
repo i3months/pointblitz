@@ -15,11 +15,23 @@ use pointblitz_io::slots::{Record, SlotHeader, encode};
 const W: u32 = 320;
 const H: u32 = 180;
 
-fn gpu() -> Option<(wgpu::Device, wgpu::Queue)> {
+/// One GPU test at a time: with many devices created and polled at once from parallel test threads,
+/// the NVIDIA Vulkan driver (V100, Linux) sometimes never returns (seen 1 run in 3; every test passes
+/// alone and the whole file passes with `--test-threads=1`). The guard keeps the GPU part serial.
+static GPU: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+type Gpu = (
+    wgpu::Device,
+    wgpu::Queue,
+    std::sync::MutexGuard<'static, ()>,
+);
+
+fn gpu() -> Option<Gpu> {
+    let guard = GPU.lock().unwrap_or_else(|e| e.into_inner());
     match pointblitz_core::headless::device() {
         Some((d, q, info)) => {
             eprintln!("adapter: {} ({:?})", info.name, info.backend);
-            Some((d, q))
+            Some((d, q, guard))
         }
         None => {
             eprintln!("no GPU adapter — skipped");
@@ -85,7 +97,9 @@ fn looking_north() -> Camera {
 
 #[test]
 fn points_appear_move_and_disappear() {
-    let Some((device, queue)) = gpu() else { return };
+    let Some((device, queue, _gpu)) = gpu() else {
+        return;
+    };
     let cam = looking_north();
     let mut hl = Headless::new(&device, [W, H]);
     let mut s = SlotScene::new([0.0; 3]);
@@ -134,7 +148,9 @@ fn points_appear_move_and_disappear() {
 
 #[test]
 fn messages_apply_in_seq_order() {
-    let Some((device, queue)) = gpu() else { return };
+    let Some((device, queue, _gpu)) = gpu() else {
+        return;
+    };
     let cam = looking_north();
     let mut hl = Headless::new(&device, [W, H]);
     let mut s = SlotScene::new([0.0; 3]);
@@ -180,7 +196,9 @@ fn messages_apply_in_seq_order() {
 
 #[test]
 fn a_new_scene_starts_only_at_seq_1_or_a_folded_state() {
-    let Some((device, queue)) = gpu() else { return };
+    let Some((device, queue, _gpu)) = gpu() else {
+        return;
+    };
     let cam = looking_north();
     let mut hl = Headless::new(&device, [W, H]);
     let a = [1.0f32, 0.0, 0.0];
@@ -215,7 +233,9 @@ fn a_new_scene_starts_only_at_seq_1_or_a_folded_state() {
 
 #[test]
 fn a_missing_event_is_recovered_from_a_folded_state() {
-    let Some((device, queue)) = gpu() else { return };
+    let Some((device, queue, _gpu)) = gpu() else {
+        return;
+    };
     let cam = looking_north();
     let mut hl = Headless::new(&device, [W, H]);
     let a = [1.0f32, 0.0, 0.0];
@@ -254,7 +274,9 @@ fn a_missing_event_is_recovered_from_a_folded_state() {
 
 #[test]
 fn a_message_too_large_for_the_device_is_refused_before_holding() {
-    let Some((device, queue)) = gpu() else { return };
+    let Some((device, queue, _gpu)) = gpu() else {
+        return;
+    };
     let mut s = SlotScene::new([0.0; 3]);
     let p = [0.0f32; 3];
     s.apply(&device, &queue, &msg(1, 1, &[(0, p, [1; 3])], &[], &[]))
@@ -275,7 +297,9 @@ fn a_message_too_large_for_the_device_is_refused_before_holding() {
 
 #[test]
 fn growing_keeps_the_slots_already_on_the_gpu() {
-    let Some((device, queue)) = gpu() else { return };
+    let Some((device, queue, _gpu)) = gpu() else {
+        return;
+    };
     let cam = looking_north();
     let mut hl = Headless::new(&device, [W, H]);
     let mut s = SlotScene::new([0.0; 3]);
@@ -306,7 +330,9 @@ fn growing_keeps_the_slots_already_on_the_gpu() {
 
 #[test]
 fn slot_and_chunk_scenes_share_one_pass_and_depth() {
-    let Some((device, queue)) = gpu() else { return };
+    let Some((device, queue, _gpu)) = gpu() else {
+        return;
+    };
     let cam = looking_north();
     let mut hl = Headless::new(&device, [W, H]);
     // Chunk scene: a far red point and a near one off to the side. Slot scene: a near green point
@@ -355,7 +381,9 @@ fn slot_and_chunk_scenes_share_one_pass_and_depth() {
 
 #[test]
 fn stream_origin_far_away_still_renders_at_the_right_pixel() {
-    let Some((device, queue)) = gpu() else { return };
+    let Some((device, queue, _gpu)) = gpu() else {
+        return;
+    };
     let origin = [300_000.0, 4_000_000.0, 120.0];
     let rel = [0.3f32, 3.0, 0.1];
     let mut s = SlotScene::new(origin);
@@ -388,7 +416,9 @@ fn theater30_replace_events_apply_in_one_frame() {
         eprintln!("PB_THEATER30_STREAM not set — skipped");
         return;
     };
-    let Some((device, queue)) = gpu() else { return };
+    let Some((device, queue, _gpu)) = gpu() else {
+        return;
+    };
     let mut stream = pointblitz_io::slots::dir::StreamDir::open(&dir).unwrap();
     let messages = stream.messages().unwrap();
     let mut hl = Headless::new(&device, [1920, 1080]);
@@ -549,7 +579,9 @@ fn same_capture(
 
 #[test]
 fn scatter_writes_the_same_slots_as_the_mirror() {
-    let Some((device, queue)) = gpu() else { return };
+    let Some((device, queue, _gpu)) = gpu() else {
+        return;
+    };
     let cam = Camera::new([0.0, -8.0, 1.0], [0.0, 0.0, 0.0], [0.0, 0.0, 1.0], 50.0);
     let mut hl = Headless::new(&device, [W, H]);
     let stream = synthetic_stream(7, 16);
@@ -606,7 +638,9 @@ fn scatter_writes_the_same_slots_as_the_mirror() {
 
 #[test]
 fn scatter_keeps_ordering_growth_and_bounds() {
-    let Some((device, queue)) = gpu() else { return };
+    let Some((device, queue, _gpu)) = gpu() else {
+        return;
+    };
     let Some(mut s) = both(&device) else { return };
     let a = [1.0f32, 0.0, 0.0];
     let b = [-1.0f32, 0.0, 0.5];
@@ -669,7 +703,9 @@ fn theater30_scatter_matches_mirror() {
         eprintln!("PB_THEATER30_STREAM not set — skipped");
         return;
     };
-    let Some((device, queue)) = gpu() else { return };
+    let Some((device, queue, _gpu)) = gpu() else {
+        return;
+    };
     let Some(mut s) = both(&device) else { return };
     let mut stream = pointblitz_io::slots::dir::StreamDir::open(&dir).unwrap();
     let messages = stream.messages().unwrap();
